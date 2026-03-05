@@ -1,0 +1,20 @@
+server/
+│
+├── src/
+│   ├── index.ts          → entry point
+│   ├── config/
+│   │     └── env.ts
+│   ├── socket/
+│   │     ├── socket.ts
+│   │     ├── auth.ts
+│   │     └── events.ts
+│   ├── routes/
+│   │     └── health.ts
+│   ├── services/
+│   │     └── message.service.ts
+│   ├── db/
+│   │     └── client.ts
+│   └── types/
+│
+├── package.json
+└── tsconfig.json

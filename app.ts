@@ -1,0 +1,19 @@
+import express from 'express';
+import friendshipsRouter from './routes/friendships.js';
+import roomsRouter from './routes/rooms.js';
+import personalInfoRouter from './routes/personalUser.js'
+import cors from 'cors';
+const app = express();
+
+app.use(
+  cors({
+    origin: 'http://localhost:3000',
+    credentials: true,
+  })
+);
+app.use(express.json());
+app.use('/api/friendships', friendshipsRouter);
+app.use('/api', roomsRouter);
+app.use('/api/personal', personalInfoRouter)
+
+export default app;

@@ -1,0 +1,19 @@
+# Dependency directories
+node_modules/
+
+# Build outputs
+dist/
+build/
+.next/
+
+# Logs and coverage
+logs/
+*.log
+coverage/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Documentation
+README.md
