@@ -109,8 +109,6 @@ router.get('/rooms', async (req, res) => {
         };
       })
       .filter(Boolean);
-
-    const joinRooms = directRooms.map((room) => (room?.roomId));
     
 
     return res.status(200).json({

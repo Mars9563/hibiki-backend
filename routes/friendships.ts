@@ -7,20 +7,35 @@ const router = express.Router();
 router.use(authMiddleware);
 router.get('/search', async (req, res) => {
   try {
-    const supabase = createUserClient(req.userJWT ?? '');
+    console.log('🔍 [SEARCH] Route hit');
+    console.log('🔍 [SEARCH] Raw query params:', req.query);
 
+    const supabase = createUserClient(req.userJWT ?? '');
     const userId = req.userId;
     const q = (req.query.q as string)?.trim();
 
+    console.log('🔍 [SEARCH] userId:', userId);
+    console.log('🔍 [SEARCH] q after trim:', q);
+    console.log('🔍 [SEARCH] q length:', q?.length);
+
     if (!q || q.length < 2) {
+      console.log('🔍 [SEARCH] Query too short, returning empty');
       return res.status(200).json({ success: true, results: [] });
     }
 
     // 1️⃣ Get all users already connected (any status)
-    const { data: existing } = await supabase
+    console.log(
+      '🔍 [SEARCH] Fetching existing friendships for userId:',
+      userId
+    );
+    const { data: existing, error: friendshipError } = await supabase
       .from('friendships')
       .select('requester_id, addressee_id')
       .or(`requester_id.eq.${userId},addressee_id.eq.${userId}`);
+
+    console.log('🔍 [SEARCH] Existing friendships:', existing);
+    if (friendshipError)
+      console.error('🔍 [SEARCH] Friendship fetch error:', friendshipError);
 
     const excludedIds = new Set<string>();
     excludedIds.add(userId as string);
@@ -30,29 +45,44 @@ router.get('/search', async (req, res) => {
       if (f.addressee_id !== userId) excludedIds.add(f.addressee_id);
     });
 
+    console.log('🔍 [SEARCH] Excluded IDs:', [...excludedIds]);
+
     // 2️⃣ Search profiles
+    console.log('🔍 [SEARCH] Searching profiles with ilike:', `%${q}%`);
     const { data: profiles, error } = await supabase
       .from('profiles')
-      .select('id, username,full_name,avatar_url')
+      .select('id, username, full_name, avatar_url')
       .ilike('username', `%${q}%`)
       .limit(10);
 
+    console.log('🔍 [SEARCH] Raw profiles result:', profiles);
+    console.log('🔍 [SEARCH] Profiles error:', error);
+
     if (error) {
-      console.error('Search error:', error);
+      console.error('🔍 [SEARCH] Profile search failed:', error);
       return res
         .status(500)
         .json({ success: false, message: 'Search failed.' });
     }
 
     // 3️⃣ Filter out excluded users
-    const results = profiles?.filter((profile) => !excludedIds.has(profile.id));
+    const results = profiles?.filter((profile) => {
+      const excluded = excludedIds.has(profile.id);
+      console.log(
+        `🔍 [SEARCH] Profile ${profile.username} (${profile.id}) excluded: ${excluded}`
+      );
+      return !excluded;
+    });
+
+    console.log('🔍 [SEARCH] Final results count:', results?.length);
+    console.log('🔍 [SEARCH] Final results:', results);
 
     return res.status(200).json({
       success: true,
       results,
     });
   } catch (error) {
-    console.error('Search route error:', error);
+    console.error('🔍 [SEARCH] Caught exception:', error);
     return res.status(500).json({
       success: false,
       message: 'Internal server error.',
@@ -335,6 +365,61 @@ router.post('/accept', async (req, res) => {
       success: false,
       message: 'Internal server error.',
     });
+  }
+});
+
+router.delete('/reject', async (req, res) => {
+  try {
+    const supabase = createUserClient(req.userJWT ?? '');
+
+    const rejecter_id = req.userId;
+    const sender_id = req.body.targetId;
+
+    if (!sender_id)
+      return res
+        .status(400)
+        .json({ success: false, message: 'No targetId found.' });
+
+    if (sender_id === rejecter_id)
+      return res
+        .status(400)
+        .json({ success: false, message: 'Cannot reject your own request.' });
+
+    // Check the request exists and current user is the addressee
+    const { data: friendship, error } = await supabase
+      .from('friendships')
+      .select('id, status')
+      .match({
+        requester_id: sender_id,
+        addressee_id: rejecter_id,
+        status: 'pending',
+      })
+      .single();
+
+    if (error || !friendship)
+      return res
+        .status(404)
+        .json({ success: false, message: 'No such pending request found.' });
+
+    const { error: deleteError } = await supabase
+      .from('friendships')
+      .delete()
+      .eq('id', friendship.id);
+
+    if (deleteError)
+      return res
+        .status(500)
+        .json({ success: false, message: 'Failed to reject request.' });
+
+    const io = getIo();
+    io.to(`${sender_id}`).emit('friendship:rejected', { by: rejecter_id });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('Reject error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error.' });
   }
 });
 
