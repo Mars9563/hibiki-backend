@@ -1,0 +1,15 @@
+app = "hibiki-server"
+primary_region = "sin"  # change to nearest: sin=Singapore, bom=Mumbai, cdg=Paris, iad=US-East
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
