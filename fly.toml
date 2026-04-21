@@ -1,5 +1,5 @@
 app = "hibiki-server"
-primary_region = "sin"  # change to nearest: sin=Singapore, bom=Mumbai, cdg=Paris, iad=US-East
+primary_region = "bom"
 
 [build]
 
