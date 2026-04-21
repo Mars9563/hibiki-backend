@@ -7,33 +7,21 @@ const router = express.Router();
 router.use(authMiddleware);
 router.get('/search', async (req, res) => {
   try {
-    console.log('🔍 [SEARCH] Route hit');
-    console.log('🔍 [SEARCH] Raw query params:', req.query);
 
     const supabase = createUserClient(req.userJWT ?? '');
     const userId = req.userId;
     const q = (req.query.q as string)?.trim();
 
-    console.log('🔍 [SEARCH] userId:', userId);
-    console.log('🔍 [SEARCH] q after trim:', q);
-    console.log('🔍 [SEARCH] q length:', q?.length);
-
     if (!q || q.length < 2) {
-      console.log('🔍 [SEARCH] Query too short, returning empty');
       return res.status(200).json({ success: true, results: [] });
     }
 
-    // 1️⃣ Get all users already connected (any status)
-    console.log(
-      '🔍 [SEARCH] Fetching existing friendships for userId:',
-      userId
-    );
+    
     const { data: existing, error: friendshipError } = await supabase
       .from('friendships')
       .select('requester_id, addressee_id')
       .or(`requester_id.eq.${userId},addressee_id.eq.${userId}`);
 
-    console.log('🔍 [SEARCH] Existing friendships:', existing);
     if (friendshipError)
       console.error('🔍 [SEARCH] Friendship fetch error:', friendshipError);
 
@@ -45,18 +33,12 @@ router.get('/search', async (req, res) => {
       if (f.addressee_id !== userId) excludedIds.add(f.addressee_id);
     });
 
-    console.log('🔍 [SEARCH] Excluded IDs:', [...excludedIds]);
-
-    // 2️⃣ Search profiles
-    console.log('🔍 [SEARCH] Searching profiles with ilike:', `%${q}%`);
     const { data: profiles, error } = await supabase
       .from('profiles')
       .select('id, username, full_name, avatar_url')
       .ilike('username', `%${q}%`)
       .limit(10);
 
-    console.log('🔍 [SEARCH] Raw profiles result:', profiles);
-    console.log('🔍 [SEARCH] Profiles error:', error);
 
     if (error) {
       console.error('🔍 [SEARCH] Profile search failed:', error);
@@ -73,9 +55,6 @@ router.get('/search', async (req, res) => {
       );
       return !excluded;
     });
-
-    console.log('🔍 [SEARCH] Final results count:', results?.length);
-    console.log('🔍 [SEARCH] Final results:', results);
 
     return res.status(200).json({
       success: true,

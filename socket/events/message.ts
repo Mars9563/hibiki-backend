@@ -50,7 +50,6 @@ export function messageEvents(io: Server, socket: Socket) {
           clientTempId: incomingMessage.clientTempId,
         });
       }
-      console.log(message);
 
       io.to(incomingMessage.room_id).emit('message:new', {
         message,
