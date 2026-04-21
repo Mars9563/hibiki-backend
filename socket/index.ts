@@ -8,7 +8,7 @@ let io: Server | null = null;
 export function initSocket(server: HTTPServer) {
   io = new Server(server, {
     cors: {
-      origin: 'http://localhost:3000',
+      origin: process.env.ALLOWED_ORIGIN ?? 'http://localhost:3000',
       credentials: true,
     },
   });
@@ -17,7 +17,7 @@ export function initSocket(server: HTTPServer) {
 
   io.on('connection', (socket) => {
     console.log('Connected:', socket.id);
-    socket.join(`${socket.data.userId}`)
+    socket.join(`${socket.data.userId}`);
 
     registerSocketEvents(io!, socket);
 
