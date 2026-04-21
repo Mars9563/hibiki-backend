@@ -18,4 +18,7 @@ app.use('/api', roomsRouter);
 app.use('/api/personal', personalInfoRouter);
 app.use('/api', messagesRouter);
 
+app.get('/', (req, res) => {
+  res.send('Hibiki backend is alive');
+});
 export default app;
