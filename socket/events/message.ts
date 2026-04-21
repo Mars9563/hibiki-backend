@@ -8,8 +8,7 @@ export function messageEvents(io: Server, socket: Socket) {
       if (!socket.data?.userId || !socket.data?.userJWT) {
         return socket.emit('message:error', { error: 'Unauthorized' });
       }
-      console.log(incomingMessage);
-      // Payload validation
+
       if (
         !incomingMessage ||
         typeof incomingMessage.room_id !== 'string' ||
@@ -51,6 +50,7 @@ export function messageEvents(io: Server, socket: Socket) {
           clientTempId: incomingMessage.clientTempId,
         });
       }
+      console.log(message);
 
       io.to(incomingMessage.room_id).emit('message:new', {
         message,
