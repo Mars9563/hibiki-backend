@@ -7,7 +7,6 @@ const router = express.Router();
 router.use(authMiddleware);
 router.get('/search', async (req, res) => {
   try {
-
     const supabase = createUserClient(req.userJWT ?? '');
     const userId = req.userId;
     const q = (req.query.q as string)?.trim();
@@ -16,7 +15,6 @@ router.get('/search', async (req, res) => {
       return res.status(200).json({ success: true, results: [] });
     }
 
-    
     const { data: existing, error: friendshipError } = await supabase
       .from('friendships')
       .select('requester_id, addressee_id')
@@ -38,7 +36,6 @@ router.get('/search', async (req, res) => {
       .select('id, username, full_name, avatar_url')
       .ilike('username', `%${q}%`)
       .limit(10);
-
 
     if (error) {
       console.error('🔍 [SEARCH] Profile search failed:', error);
@@ -174,14 +171,16 @@ router.post('/request', async (req, res) => {
         .json({ success: false, message: 'Cannot send request to yourself' });
     }
 
-    // 2️⃣ Ensure target user exists
-    const { data: targetUser } = await supabase
+    // 2️⃣ Ensure target user exists — and grab their profile now so we
+    // can return a fully-formed friendship row without a second round
+    // trip from the frontend.
+    const { data: targetProfile } = await supabase
       .from('profiles')
-      .select('id')
+      .select('id, username, full_name, avatar_url')
       .eq('id', targetId)
-      .limit(1);
+      .maybeSingle();
 
-    if (!targetUser || targetUser.length === 0) {
+    if (!targetProfile) {
       return res
         .status(404)
         .json({ success: false, message: 'Target user not found' });
@@ -202,19 +201,33 @@ router.post('/request', async (req, res) => {
         .json({ success: false, message: 'Friendship already exists' });
     }
 
-    // 4️⃣ Insert friendship
-    const { data, error } = await supabase.from('friendships').insert({
-      requester_id: requesterId,
-      addressee_id: targetId,
-      status: 'pending',
-    });
-    console.log(data);
-    console.log(error);
-    if (error) {
+    // 4️⃣ Insert friendship and select the row back (was previously
+    // a fire-and-forget insert with no returned data).
+    const { data: friendship, error } = await supabase
+      .from('friendships')
+      .insert({
+        requester_id: requesterId,
+        addressee_id: targetId,
+        status: 'pending',
+      })
+      .select('id, status, created_at, requester_id, addressee_id')
+      .single();
+
+    if (error || !friendship) {
+      console.error(error);
       return res
         .status(500)
         .json({ success: false, message: 'Failed to send request' });
     }
+
+    // 5️⃣ Also fetch the requester's own profile so the payload is
+    // shaped exactly like a /pending entry — frontend can push it
+    // straight into sentPending with zero guessing.
+    const { data: requesterProfile } = await supabase
+      .from('profiles')
+      .select('id, username, full_name, avatar_url')
+      .eq('id', requesterId)
+      .maybeSingle();
 
     getIo().to(`${requesterId}`).emit('friendship:requested', {
       to: targetId,
@@ -226,6 +239,11 @@ router.post('/request', async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Friend request sent successfully',
+      friendship: {
+        ...friendship,
+        requester: requesterProfile,
+        addressee: targetProfile,
+      },
     });
   } catch (error) {
     console.error('Friendship request error: ', error);
@@ -254,7 +272,7 @@ router.post('/accept', async (req, res) => {
         .json({ success: false, message: 'Can not accept self request.' });
 
     // check if request is present in the db;
-    const { data: friendship,error } = await supabase
+    const { data: friendship, error } = await supabase
       .from('friendships')
       .select('id, status')
       .match({
