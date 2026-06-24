@@ -1,0 +1,244 @@
+import express from 'express';
+import authMiddleware from '../middleware/auth.js';
+import { createUserClient } from '../config/supabase.js';
+import { getIo } from '../socket/index.js';
+import {
+  GroupServiceError,
+  createGroup,
+  inviteToGroup,
+  acceptGroupInvite,
+  rejectGroupInvite,
+} from '../services/room.service.js';
+
+const router = express.Router();
+router.use(authMiddleware);
+
+// ---------- POST /api/groups ----------
+// Create a group. Creator becomes the sole initial participant
+// (role: admin). Everyone in inviteeIds gets a pending group_invite —
+// there is no direct-add path, even at creation time.
+router.post('/groups', async (req, res) => {
+  try {
+    const creatorId = req.userId as string;
+    const creatorJWT = req.userJWT as string;
+    const { name, inviteeIds } = req.body as {
+      name?: string;
+      inviteeIds?: string[];
+    };
+
+    if (!name || typeof name !== 'string') {
+      return res
+        .status(400)
+        .json({ success: false, message: 'Group name is required' });
+    }
+
+    if (!Array.isArray(inviteeIds)) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'inviteeIds must be an array' });
+    }
+
+    const { room, invites } = await createGroup({
+      creatorId,
+      creatorJWT,
+      name,
+      inviteeIds,
+    });
+
+    // Notify each invitee live, same pattern as friendship:got_a_request.
+    const io = getIo();
+    invites.forEach((invite) => {
+      io.to(`${invite.invitee_id}`).emit('group:invited', {
+        roomId: room.id,
+        roomName: room.name,
+        inviterId: creatorId,
+        inviteId: invite.id,
+      });
+    });
+
+    return res.status(201).json({ success: true, room, invites });
+  } catch (error) {
+    if (error instanceof GroupServiceError) {
+      return res
+        .status(error.status)
+        .json({ success: false, message: error.message });
+    }
+    console.error('Create group error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ---------- POST /api/groups/:roomId/invites ----------
+// Invite a user to an existing group. Admin-only, enforced in the
+// service layer. Same shape whether this is the first invite round
+// or a later "invite more people" action — no separate concept.
+router.post('/groups/:roomId/invites', async (req, res) => {
+  try {
+    const inviterId = req.userId as string;
+    const inviterJWT = req.userJWT as string;
+    const { roomId } = req.params;
+    const { inviteeId } = req.body as { inviteeId?: string };
+
+    if (!inviteeId) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'inviteeId is required' });
+    }
+
+    const invite = await inviteToGroup({
+      roomId,
+      inviterId,
+      inviterJWT,
+      inviteeId,
+    });
+
+    getIo().to(`${inviteeId}`).emit('group:invited', {
+      roomId,
+      inviterId,
+      inviteId: invite.id,
+    });
+
+    return res.status(201).json({ success: true, invite });
+  } catch (error) {
+    if (error instanceof GroupServiceError) {
+      return res
+        .status(error.status)
+        .json({ success: false, message: error.message });
+    }
+    console.error('Invite to group error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ---------- GET /api/group-invites/pending ----------
+// Mirrors friendships/pending — invites where the current user is
+// the invitee, enriched with room + inviter info.
+router.get('/group-invites/pending', async (req, res) => {
+  try {
+    const supabase = createUserClient(req.userJWT ?? '');
+    const userId = req.userId;
+
+    const { data: invites, error } = await supabase
+      .from('group_invites')
+      .select('id, status, created_at, room_id, inviter_id, invitee_id')
+      .eq('invitee_id', userId)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Group invites pending fetch error:', error);
+      return res
+        .status(500)
+        .json({ success: false, message: 'Failed to fetch invites' });
+    }
+
+    if (!invites || invites.length === 0) {
+      return res.status(200).json({ success: true, pending: [] });
+    }
+
+    const roomIds = [...new Set(invites.map((i) => i.room_id))];
+    const inviterIds = [...new Set(invites.map((i) => i.inviter_id))];
+
+    const [{ data: rooms }, { data: inviters }] = await Promise.all([
+      supabase
+        .from('chat_rooms')
+        .select('id, name, avatar_url')
+        .in('id', roomIds),
+      supabase
+        .from('profiles')
+        .select('id, username, full_name, avatar_url')
+        .in('id', inviterIds),
+    ]);
+
+    const roomMap = Object.fromEntries((rooms ?? []).map((r) => [r.id, r]));
+    const inviterMap = Object.fromEntries(
+      (inviters ?? []).map((p) => [p.id, p])
+    );
+
+    const enriched = invites.map((invite) => ({
+      ...invite,
+      room: roomMap[invite.room_id],
+      inviter: inviterMap[invite.inviter_id],
+    }));
+
+    return res.status(200).json({ success: true, pending: enriched });
+  } catch (error) {
+    console.error('Group invites pending route error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ---------- POST /api/group-invites/accept ----------
+router.post('/group-invites/accept', async (req, res) => {
+  try {
+    const inviteeId = req.userId as string;
+    const inviteeJWT = req.userJWT as string;
+    const { inviteId } = req.body as { inviteId?: string };
+
+    if (!inviteId) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'inviteId is required' });
+    }
+
+    const room = await acceptGroupInvite({ inviteId, inviteeId, inviteeJWT });
+
+    // Let everyone already in the room (including the new member's
+    // own other sessions) know a member joined.
+    getIo().to(room.id).emit('group:memberJoined', {
+      roomId: room.id,
+      userId: inviteeId,
+    });
+    // Hand the new member their room directly, same as
+    // friendship:accepted does for direct rooms.
+    getIo().to(`${inviteeId}`).emit('group:joined', { room });
+
+    return res.status(200).json({ success: true, room });
+  } catch (error) {
+    if (error instanceof GroupServiceError) {
+      return res
+        .status(error.status)
+        .json({ success: false, message: error.message });
+    }
+    console.error('Accept group invite error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ---------- DELETE /api/group-invites/reject ----------
+router.delete('/group-invites/reject', async (req, res) => {
+  try {
+    const inviteeId = req.userId as string;
+    const { inviteId } = req.body as { inviteId?: string };
+
+    if (!inviteId) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'inviteId is required' });
+    }
+
+    await rejectGroupInvite({ inviteId, inviteeId });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    if (error instanceof GroupServiceError) {
+      return res
+        .status(error.status)
+        .json({ success: false, message: error.message });
+    }
+    console.error('Reject group invite error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
+  }
+});
+
+export default router;
