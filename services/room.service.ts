@@ -127,10 +127,13 @@ export async function createGroup({
 
   // 1️⃣ Create the room (service role — no INSERT policy on chat_rooms
   // for normal users, same constraint the direct-room path already
-  // works around).
+  // works around). Name must be set in this same insert — the
+  // chat_rooms_name_matches_type check constraint requires a non-empty
+  // name on any row with type = 'group' at insert time, so a bare
+  // insert-then-update sequence violates it before the update runs.
   const { data: room, error: roomError } = await supabaseSuperUser
     .from('chat_rooms')
-    .insert({ type: 'group' })
+    .insert({ type: 'group', name: trimmedName })
     .select()
     .single();
 
@@ -149,18 +152,6 @@ export async function createGroup({
   if (participantError) {
     console.error('createGroup participant insert error:', participantError);
     throw new GroupServiceError(500, 'Failed to create group');
-  }
-
-  // 3️⃣ Set the name (requires the chat_rooms migration adding
-  // name/avatar_url/updated_at — run before this code executes).
-  const { error: nameError } = await supabaseSuperUser
-    .from('chat_rooms')
-    .update({ name: trimmedName })
-    .eq('id', room.id);
-
-  if (nameError) {
-    console.error('createGroup name update error:', nameError);
-    throw new GroupServiceError(500, 'Failed to set group name');
   }
 
   // 4️⃣ Insert invite rows for everyone else (user-scoped client —
@@ -409,4 +400,85 @@ export async function rejectGroupInvite({
     console.error('rejectGroupInvite delete error:', deleteError);
     throw new GroupServiceError(500, 'Failed to reject invite');
   }
+}
+
+type GroupInviteStatusInfo = {
+  userId: string;
+  username: string;
+  fullName: string | null;
+  avatarUrl: string | null;
+  status: 'accepted' | 'pending';
+};
+
+// Used only by GET /api/group-invites/pending, to let a PENDING
+// INVITEE see who else is already in / invited to a group they
+// haven't joined yet. RLS deliberately blocks this for both tables
+// (chat_room_participants requires existing membership; group_invites
+// only exposes rows where you're the inviter or that specific
+// invitee) — so this is a narrow, read-only exception that goes
+// through supabaseSuperUser and returns ONLY display-safe fields,
+// never raw invite rows, tokens, or anything else.
+export async function getGroupRosterForInvitee(roomId: string) {
+  const { data: participants, error: participantsError } =
+    await supabaseSuperUser
+      .from('chat_room_participants')
+      .select('user_id')
+      .eq('room_id', roomId);
+
+  if (participantsError) {
+    throw new GroupServiceError(500, 'Failed to load group roster');
+  }
+
+  // Only the most recent pending invite per invitee matters here —
+  // rejected invites are deleted outright (see rejectGroupInvite), so
+  // any row still present that isn't 'accepted' is, by construction,
+  // pending.
+  const { data: invites, error: invitesError } = await supabaseSuperUser
+    .from('group_invites')
+    .select('invitee_id, status')
+    .eq('room_id', roomId);
+
+  if (invitesError) {
+    throw new GroupServiceError(500, 'Failed to load group roster');
+  }
+
+  const memberIds = (participants ?? []).map((p) => p.user_id);
+  const pendingIds = (invites ?? [])
+    .filter((i) => i.status === 'pending')
+    .map((i) => i.invitee_id);
+
+  const allIds = [...new Set([...memberIds, ...pendingIds])];
+
+  const { data: profiles, error: profilesError } = await supabaseSuperUser
+    .from('profiles')
+    .select('id, username, full_name, avatar_url')
+    .in(
+      'id',
+      allIds.length > 0 ? allIds : ['00000000-0000-0000-0000-000000000000']
+    );
+
+  if (profilesError) {
+    throw new GroupServiceError(500, 'Failed to load group roster');
+  }
+
+  const profileMap = new Map((profiles ?? []).map((p) => [p.id, p]));
+  const memberIdSet = new Set(memberIds);
+
+  const roster: GroupInviteStatusInfo[] = allIds
+    .map((id) => {
+      const profile = profileMap.get(id);
+      if (!profile) return null;
+      return {
+        userId: profile.id,
+        username: profile.username,
+        fullName: profile.full_name,
+        avatarUrl: profile.avatar_url,
+        status: memberIdSet.has(id)
+          ? ('accepted' as const)
+          : ('pending' as const),
+      };
+    })
+    .filter((r): r is GroupInviteStatusInfo => r !== null);
+
+  return roster;
 }

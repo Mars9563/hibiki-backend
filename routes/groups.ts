@@ -1,6 +1,6 @@
 import express from 'express';
 import authMiddleware from '../middleware/auth.js';
-import { createUserClient } from '../config/supabase.js';
+import { createUserClient, supabaseSuperUser } from '../config/supabase.js';
 import { getIo } from '../socket/index.js';
 import {
   GroupServiceError,
@@ -8,6 +8,7 @@ import {
   inviteToGroup,
   acceptGroupInvite,
   rejectGroupInvite,
+  getGroupRosterForInvitee,
 } from '../services/room.service.js';
 
 const router = express.Router();
@@ -116,7 +117,11 @@ router.post('/groups/:roomId/invites', async (req, res) => {
 
 // ---------- GET /api/group-invites/pending ----------
 // Mirrors friendships/pending — invites where the current user is
-// the invitee, enriched with room + inviter info.
+// the invitee, enriched with room + inviter info AND, now, the
+// full roster of that group (who's accepted, who's still pending)
+// so the invitee can see group composition before deciding whether
+// to join. Roster comes from a service-role lookup since a pending
+// invitee has no RLS-visible access to a room they haven't joined.
 router.get('/group-invites/pending', async (req, res) => {
   try {
     const supabase = createUserClient(req.userJWT ?? '');
@@ -143,8 +148,12 @@ router.get('/group-invites/pending', async (req, res) => {
     const roomIds = [...new Set(invites.map((i) => i.room_id))];
     const inviterIds = [...new Set(invites.map((i) => i.inviter_id))];
 
-    const [{ data: rooms }, { data: inviters }] = await Promise.all([
-      supabase
+    const [{ data: rooms }, { data: inviters }, rosters] = await Promise.all([
+      // service role: chat_rooms SELECT policy requires the caller to
+      // already be a participant (is_room_participant), but a pending
+      // invitee isn't one yet — user-scoped client silently returns []
+      // here, which is what caused room: undefined downstream.
+      supabaseSuperUser
         .from('chat_rooms')
         .select('id, name, avatar_url')
         .in('id', roomIds),
@@ -152,17 +161,22 @@ router.get('/group-invites/pending', async (req, res) => {
         .from('profiles')
         .select('id, username, full_name, avatar_url')
         .in('id', inviterIds),
+      Promise.all(roomIds.map((id) => getGroupRosterForInvitee(id))),
     ]);
 
     const roomMap = Object.fromEntries((rooms ?? []).map((r) => [r.id, r]));
     const inviterMap = Object.fromEntries(
       (inviters ?? []).map((p) => [p.id, p])
     );
+    const rosterMap = Object.fromEntries(
+      roomIds.map((id, i) => [id, rosters[i]])
+    );
 
     const enriched = invites.map((invite) => ({
       ...invite,
       room: roomMap[invite.room_id],
       inviter: inviterMap[invite.inviter_id],
+      roster: rosterMap[invite.room_id] ?? [],
     }));
 
     return res.status(200).json({ success: true, pending: enriched });
