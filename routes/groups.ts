@@ -49,7 +49,7 @@ router.post('/groups', async (req, res) => {
     const io = getIo();
     invites.forEach((invite) => {
       io.to(`${invite.invitee_id}`).emit('group:invited', {
-        roomId: room.id,
+        roomId: room.roomId,
         roomName: room.name,
         inviterId: creatorId,
         inviteId: invite.id,
@@ -191,8 +191,8 @@ router.post('/group-invites/accept', async (req, res) => {
 
     // Let everyone already in the room (including the new member's
     // own other sessions) know a member joined.
-    getIo().to(room.id).emit('group:memberJoined', {
-      roomId: room.id,
+    getIo().to(room.roomId).emit('group:memberJoined', {
+      roomId: room.roomId,
       userId: inviteeId,
     });
     // Hand the new member their room directly, same as
@@ -238,6 +238,45 @@ router.delete('/group-invites/reject', async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ---------- GET /api/groups/search ----------
+// Search for users to invite to a group. Unlike /friendships/search,
+// this does NOT filter out existing friends — group invites are
+// independent of friendship status, so your actual friends (who
+// you're most likely to want in a group) must show up. Only
+// exclusion: yourself.
+router.get('/groups/search', async (req, res) => {
+  try {
+    const supabase = createUserClient(req.userJWT ?? '');
+    const userId = req.userId;
+    const q = (req.query.q as string)?.trim();
+
+    if (!q || q.length < 2) {
+      return res.status(200).json({ success: true, results: [] });
+    }
+
+    const { data: profiles, error } = await supabase
+      .from('profiles')
+      .select('id, username, full_name, avatar_url')
+      .ilike('username', `%${q}%`)
+      .neq('id', userId)
+      .limit(10);
+
+    if (error) {
+      console.error('Group search error:', error);
+      return res
+        .status(500)
+        .json({ success: false, message: 'Search failed.' });
+    }
+
+    return res.status(200).json({ success: true, results: profiles ?? [] });
+  } catch (error) {
+    console.error('Group search route error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error.' });
   }
 });
 

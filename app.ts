@@ -18,7 +18,7 @@ app.use('/api/friendships', friendshipsRouter);
 app.use('/api', roomsRouter);
 app.use('/api/personal', personalInfoRouter);
 app.use('/api', messagesRouter);
-app.use('/api/', groupsRouter);
+app.use('/api', groupsRouter);
 
 app.get('/', (req, res) => {
   res.send('Hibiki backend is alive');

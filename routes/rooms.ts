@@ -1,3 +1,12 @@
+// ============================================================
+// routes/rooms.ts
+// PATCHED to return direct AND group rooms in one unified `rooms`
+// array, discriminated by `roomType`. The frontend rooms slice
+// consumes this directly — see store/slices/createRoomSlice.ts.
+//
+// Old contract: { success, directRooms: DirectChatRoomDTO[] }
+// New contract: { success, rooms: (DirectChatRoomDTO | GroupChatRoomDTO)[] }
+// ============================================================
 import express from 'express';
 import { createUserClient } from '../config/supabase.js';
 import authMiddleware from '../middleware/auth.js';
@@ -7,113 +16,189 @@ router.use(authMiddleware);
 
 router.get('/rooms', async (req, res) => {
   try {
+    const userId = req.userId as string;
+    const userJWT = req.userJWT as string;
 
-    const userId = req.userId;
-    const userJWT = req.userJWT;
+    const supabase = createUserClient(userJWT);
 
+    // 1️⃣ Fetch every room this user participates in, of any type.
+    const { data: participantRows, error: participantError } = await supabase
+      .from('chat_room_participants')
+      .select('room_id, role')
+      .eq('user_id', userId);
 
-    const supabase = createUserClient(userJWT!);
+    if (participantError) {
+      console.error('Rooms participant fetch error:', participantError);
+      return res.status(500).json({ success: false });
+    }
 
-    // 1️⃣ Fetch direct rooms
+    if (!participantRows || participantRows.length === 0) {
+      return res.status(200).json({ success: true, rooms: [] });
+    }
+
+    const roomIds = participantRows.map((p) => p.room_id);
+    const myRoleByRoom = new Map(
+      participantRows.map((p) => [p.room_id, p.role])
+    );
 
     const { data: rooms, error: roomError } = await supabase
       .from('chat_rooms')
-      .select('id')
-      .eq('type', 'direct');
-
+      .select('id, type, name, avatar_url, updated_at')
+      .in('id', roomIds);
 
     if (roomError) {
+      console.error('Rooms fetch error:', roomError);
       return res.status(500).json({ success: false });
     }
 
     if (!rooms || rooms.length === 0) {
-      return res.status(200).json({ success: true, directRooms: [] });
+      return res.status(200).json({ success: true, rooms: [] });
     }
 
-    const roomIds = rooms.map((r) => r.id);
+    const directRoomIds = rooms
+      .filter((r) => r.type === 'direct')
+      .map((r) => r.id);
+    const groupRoomIds = rooms
+      .filter((r) => r.type === 'group')
+      .map((r) => r.id);
 
-    // 2️⃣ Fetch participants
+    // 2️⃣ For direct rooms: fetch the other participant + their profile.
+    let directRoomDtos: any[] = [];
 
-    const { data: chatRoomParticipants, error: participantsError } =
-      await supabase
-        .from('chat_room_participants')
-        .select('room_id, user_id')
-        .in('room_id', roomIds);
+    if (directRoomIds.length > 0) {
+      const { data: directParticipants, error: directParticipantsError } =
+        await supabase
+          .from('chat_room_participants')
+          .select('room_id, user_id')
+          .in('room_id', directRoomIds);
 
+      if (directParticipantsError) {
+        console.error(
+          'Direct room participants fetch error:',
+          directParticipantsError
+        );
+        return res.status(500).json({ success: false });
+      }
 
-    if (participantsError) {
-      return res.status(500).json({ success: false });
+      const otherUserIds = [
+        ...new Set(
+          (directParticipants ?? [])
+            .filter((p) => p.user_id !== userId)
+            .map((p) => p.user_id)
+        ),
+      ];
+
+      const { data: otherProfiles, error: otherProfilesError } =
+        otherUserIds.length > 0
+          ? await supabase
+              .from('profiles')
+              .select('id, username, full_name, avatar_url')
+              .in('id', otherUserIds)
+          : { data: [], error: null };
+
+      if (otherProfilesError) {
+        console.error('Direct room profiles fetch error:', otherProfilesError);
+        return res.status(500).json({ success: false });
+      }
+
+      const profileMap = new Map((otherProfiles ?? []).map((p) => [p.id, p]));
+
+      directRoomDtos = (directParticipants ?? [])
+        .filter((p) => p.user_id !== userId)
+        .map((p) => {
+          const otherProfile = profileMap.get(p.user_id);
+          if (!otherProfile) return null;
+
+          return {
+            roomId: p.room_id,
+            roomType: 'direct' as const,
+            currentUserId: userId,
+            otherUserId: p.user_id,
+            otherUser: {
+              id: otherProfile.id,
+              fullName: otherProfile.full_name,
+              username: otherProfile.username,
+              avatarUrl: otherProfile.avatar_url,
+            },
+          };
+        })
+        .filter(Boolean);
     }
 
-    if (!chatRoomParticipants || chatRoomParticipants.length === 0) {
-      return res.status(200).json({ success: true, directRooms: [] });
-    }
+    // 3️⃣ For group rooms: fetch every member + their profile, plus
+    // room name/avatar already pulled in `rooms` above.
+    let groupRoomDtos: any[] = [];
 
-    // 3️⃣ Extract other users
+    if (groupRoomIds.length > 0) {
+      const { data: groupParticipants, error: groupParticipantsError } =
+        await supabase
+          .from('chat_room_participants')
+          .select('room_id, user_id, role')
+          .in('room_id', groupRoomIds);
 
-    const otherUsers = chatRoomParticipants
-      .filter((user) => user.user_id !== userId)
-      .map((user) => user.user_id);
+      if (groupParticipantsError) {
+        console.error(
+          'Group room participants fetch error:',
+          groupParticipantsError
+        );
+        return res.status(500).json({ success: false });
+      }
 
-    const uniqueOtherUsers = [...new Set(otherUsers)];
+      const memberIds = [
+        ...new Set((groupParticipants ?? []).map((p) => p.user_id)),
+      ];
 
+      const { data: memberProfiles, error: memberProfilesError } =
+        memberIds.length > 0
+          ? await supabase
+              .from('profiles')
+              .select('id, username, full_name, avatar_url')
+              .in('id', memberIds)
+          : { data: [], error: null };
 
-    if (uniqueOtherUsers.length === 0) {
-      return res.status(200).json({ success: true, directRooms: [] });
-    }
+      if (memberProfilesError) {
+        console.error(
+          'Group member profiles fetch error:',
+          memberProfilesError
+        );
+        return res.status(500).json({ success: false });
+      }
 
-    // 4️⃣ Fetch profiles
+      const profileMap = new Map((memberProfiles ?? []).map((p) => [p.id, p]));
+      const roomMap = new Map(rooms.map((r) => [r.id, r]));
 
-    const { data: userProfiles, error: userProfileError } = await supabase
-      .from('profiles')
-      .select('id, username, full_name, avatar_url')
-      .in('id', uniqueOtherUsers);
+      const participantsByRoom = new Map<string, any[]>();
+      (groupParticipants ?? []).forEach((p) => {
+        const profile = profileMap.get(p.user_id);
+        if (!profile) return;
+        const list = participantsByRoom.get(p.room_id) ?? [];
+        list.push({
+          id: profile.id,
+          username: profile.username,
+          fullName: profile.full_name,
+          avatarUrl: profile.avatar_url,
+          role: p.role,
+        });
+        participantsByRoom.set(p.room_id, list);
+      });
 
-
-    if (userProfileError) {
-      return res.status(500).json({ success: false });
-    }
-
-    if (!userProfiles || userProfiles.length === 0) {
-      return res.status(200).json({ success: true, directRooms: [] });
-    }
-
-    // 5️⃣ Build response
-
-    const profileMap = new Map(
-      userProfiles.map((profile) => [profile.id, profile])
-    );
-
-
-    const directRooms = chatRoomParticipants
-      .filter((room) => room.user_id !== userId)
-      .map((room) => {
-        const otherProfile = profileMap.get(room.user_id);
-
-
-        if (!otherProfile) {
-          return null;
-        }
-
+      groupRoomDtos = groupRoomIds.map((roomId) => {
+        const room = roomMap.get(roomId);
         return {
-          roomId: room.room_id,
-          roomType: 'direct',
+          roomId,
+          roomType: 'group' as const,
           currentUserId: userId,
-          otherUserId: room.user_id,
-          otherUser: {
-            id: otherProfile.id,
-            fullName: otherProfile.full_name,
-            username: otherProfile.username,
-            avatarUrl: otherProfile.avatar_url,
-          },
+          currentUserRole: myRoleByRoom.get(roomId) ?? 'member',
+          name: room?.name ?? 'Unnamed group',
+          avatarUrl: room?.avatar_url ?? null,
+          members: participantsByRoom.get(roomId) ?? [],
         };
-      })
-      .filter(Boolean);
-    
+      });
+    }
 
     return res.status(200).json({
       success: true,
-      directRooms,
+      rooms: [...directRoomDtos, ...groupRoomDtos],
     });
   } catch (error) {
     console.error('\nROOMS ROUTE CRASH:', error);

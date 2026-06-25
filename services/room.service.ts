@@ -27,6 +27,80 @@ export class GroupServiceError extends Error {
   }
 }
 
+// Shared by createGroup and acceptGroupInvite — both need to hand a
+// group room straight to a single client in the exact shape
+// GET /api/rooms produces (roomId/roomType/members[]/etc), NOT the
+// bare chat_rooms row. Keeping this in one place avoids the two call
+// sites silently drifting into two different "what is a group room"
+// shapes over time.
+async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
+  const { data: room, error: roomError } = await supabaseSuperUser
+    .from('chat_rooms')
+    .select('id, name, avatar_url')
+    .eq('id', roomId)
+    .single();
+
+  if (roomError || !room) {
+    throw new GroupServiceError(500, 'Failed to load group');
+  }
+
+  const { data: participants, error: participantsError } =
+    await supabaseSuperUser
+      .from('chat_room_participants')
+      .select('user_id, role')
+      .eq('room_id', roomId);
+
+  if (participantsError) {
+    throw new GroupServiceError(500, 'Failed to load group members');
+  }
+
+  const memberIds = (participants ?? []).map((p) => p.user_id);
+  const { data: profiles, error: profilesError } = await supabaseSuperUser
+    .from('profiles')
+    .select('id, username, full_name, avatar_url')
+    .in(
+      'id',
+      memberIds.length > 0
+        ? memberIds
+        : ['00000000-0000-0000-0000-000000000000']
+    );
+
+  if (profilesError) {
+    throw new GroupServiceError(500, 'Failed to load group members');
+  }
+
+  const profileMap = new Map((profiles ?? []).map((p) => [p.id, p]));
+  const roleByUserId = new Map(
+    (participants ?? []).map((p) => [p.user_id, p.role])
+  );
+
+  const members = (participants ?? [])
+    .map((p) => {
+      const profile = profileMap.get(p.user_id);
+      if (!profile) return null;
+      return {
+        id: profile.id,
+        username: profile.username,
+        fullName: profile.full_name,
+        avatarUrl: profile.avatar_url,
+        role: p.role,
+      };
+    })
+    .filter((m): m is NonNullable<typeof m> => m !== null);
+
+  return {
+    roomId: room.id,
+    roomType: 'group' as const,
+    currentUserId: forUserId,
+    currentUserRole: (roleByUserId.get(forUserId) ?? 'member') as
+      | 'admin'
+      | 'member',
+    name: room.name as string,
+    avatarUrl: room.avatar_url as string | null,
+    members,
+  };
+}
+
 type CreateGroupParams = {
   creatorId: string;
   creatorJWT: string;
@@ -77,11 +151,8 @@ export async function createGroup({
     throw new GroupServiceError(500, 'Failed to create group');
   }
 
-  // 3️⃣ We also need a `name` column to exist for groups to be
-  // displayable — see migration note below. For now this function
-  // assumes `chat_rooms.name` exists; if it doesn't yet, this update
-  // will simply no-op on a non-existent column and Postgres will error,
-  // which is the signal to run the migration first.
+  // 3️⃣ Set the name (requires the chat_rooms migration adding
+  // name/avatar_url/updated_at — run before this code executes).
   const { error: nameError } = await supabaseSuperUser
     .from('chat_rooms')
     .update({ name: trimmedName })
@@ -126,8 +197,15 @@ export async function createGroup({
     invites = insertedInvites ?? [];
   }
 
+  // Return the enriched shape (roomId/roomType/members[]/etc) — same
+  // contract as acceptGroupInvite, so the frontend's upsertRoom() can
+  // consume either response identically with no translation step. At
+  // this point the only member is the creator, so this resolves to a
+  // single-element members array with role 'admin'.
+  const enrichedRoom = await getEnrichedGroupRoom(room.id, creatorId);
+
   return {
-    room: { ...room, name: trimmedName, type: 'group' as const },
+    room: enrichedRoom,
     invites,
   };
 }
@@ -279,19 +357,11 @@ export async function acceptGroupInvite({
     throw new GroupServiceError(500, 'Failed to join group');
   }
 
-  // Fetch the full room so the caller can hand it straight to the
-  // frontend (same "return a fully-formed object" pattern as
-  // friendships/accept).
-  const { data: room, error: roomError } = await supabaseSuperUser
-    .from('chat_rooms')
-    .select('*')
-    .eq('id', invite.room_id)
-    .single();
-
-  if (roomError || !room) {
-    console.error('acceptGroupInvite room fetch error:', roomError);
-    throw new GroupServiceError(500, 'Joined group but failed to load it');
-  }
+  // Fetch the full enriched room (roomId/roomType/members[]/etc — the
+  // exact shape GET /api/rooms produces) so the caller can hand it
+  // straight to the frontend and upsertRoom() works without any
+  // shape translation on the client side.
+  const room = await getEnrichedGroupRoom(invite.room_id, inviteeId);
 
   return room;
 }
