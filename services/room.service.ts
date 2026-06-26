@@ -18,6 +18,10 @@
 // that route here; just making sure groups doesn't repeat it).
 // ============================================================
 import { createUserClient, supabaseSuperUser } from '../config/supabase.js';
+import {
+  getSignedAvatarUrl,
+  uploadGroupAvatarBuffer,
+} from '../config/cloudinary.js';
 
 export class GroupServiceError extends Error {
   status: number;
@@ -36,7 +40,7 @@ export class GroupServiceError extends Error {
 async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
   const { data: room, error: roomError } = await supabaseSuperUser
     .from('chat_rooms')
-    .select('id, name, avatar_url')
+    .select('id, name, avatar_public_id, description') // was: avatar_url
     .eq('id', roomId)
     .single();
 
@@ -57,7 +61,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
   const memberIds = (participants ?? []).map((p) => p.user_id);
   const { data: profiles, error: profilesError } = await supabaseSuperUser
     .from('profiles')
-    .select('id, username, full_name, avatar_url')
+    .select('id, username, full_name, avatar_public_id') // was: avatar_url
     .in(
       'id',
       memberIds.length > 0
@@ -82,7 +86,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
         id: profile.id,
         username: profile.username,
         fullName: profile.full_name,
-        avatarUrl: profile.avatar_url,
+        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id), // was: profile.avatar_url
         role: p.role,
       };
     })
@@ -96,7 +100,8 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
       | 'admin'
       | 'member',
     name: room.name as string,
-    avatarUrl: room.avatar_url as string | null,
+    avatarUrl: getSignedAvatarUrl(room.avatar_public_id), // was: room.avatar_url
+    description: room.description as string | null,
     members,
   };
 }
@@ -451,7 +456,7 @@ export async function getGroupRosterForInvitee(roomId: string) {
 
   const { data: profiles, error: profilesError } = await supabaseSuperUser
     .from('profiles')
-    .select('id, username, full_name, avatar_url')
+    .select('id, username, full_name, avatar_public_id') // was: avatar_url
     .in(
       'id',
       allIds.length > 0 ? allIds : ['00000000-0000-0000-0000-000000000000']
@@ -472,7 +477,7 @@ export async function getGroupRosterForInvitee(roomId: string) {
         userId: profile.id,
         username: profile.username,
         fullName: profile.full_name,
-        avatarUrl: profile.avatar_url,
+        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id), // was: profile.avatar_url
         status: memberIdSet.has(id)
           ? ('accepted' as const)
           : ('pending' as const),
@@ -481,4 +486,89 @@ export async function getGroupRosterForInvitee(roomId: string) {
     .filter((r): r is GroupInviteStatusInfo => r !== null);
 
   return roster;
+}
+
+type UpdateGroupParams = {
+  roomId: string;
+  adminId: string;
+  adminJWT: string;
+  name?: string;
+  description?: string;
+  avatarBuffer?: Buffer;
+};
+
+export async function updateGroup({
+  roomId,
+  adminId,
+  adminJWT,
+  name,
+  description,
+  avatarBuffer,
+}: UpdateGroupParams) {
+  const userClient = createUserClient(adminJWT);
+
+  // Confirm admin role explicitly before doing any work — the RLS
+  // policy enforces this too, but checking here lets us return a
+  // clean 403 with a real message instead of a silent "0 rows
+  // updated" from Postgres.
+  const { data: membership, error: membershipError } = await userClient
+    .from('chat_room_participants')
+    .select('role')
+    .eq('room_id', roomId)
+    .eq('user_id', adminId)
+    .maybeSingle();
+
+  if (membershipError) {
+    console.error('updateGroup membership check error:', membershipError);
+    throw new GroupServiceError(500, 'Server error');
+  }
+
+  if (!membership || membership.role !== 'admin') {
+    throw new GroupServiceError(403, 'Only admins can edit this group');
+  }
+
+  const patch: Record<string, string> = {};
+
+  if (name !== undefined) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw new GroupServiceError(400, 'Group name is required');
+    }
+    patch.name = trimmed;
+  }
+
+  if (description !== undefined) {
+    patch.description = description.trim();
+  }
+
+  if (avatarBuffer) {
+    try {
+      const { public_id } = await uploadGroupAvatarBuffer(avatarBuffer, roomId);
+      patch.avatar_public_id = public_id;
+    } catch (err) {
+      console.error('Group avatar upload error:', err);
+      throw new GroupServiceError(502, 'Failed to upload group photo');
+    }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    throw new GroupServiceError(400, 'No fields to update');
+  }
+
+  // chat_rooms has no UPDATE policy for normal users today except the
+  // new admin-scoped one — this still goes through supabaseSuperUser
+  // for consistency with every other chat_rooms write in this file
+  // (see the trust-boundary note at the top), with the role check
+  // above doing the actual authorization.
+  const { error: updateError } = await supabaseSuperUser
+    .from('chat_rooms')
+    .update(patch)
+    .eq('id', roomId);
+
+  if (updateError) {
+    console.error('updateGroup update error:', updateError);
+    throw new GroupServiceError(500, 'Failed to update group');
+  }
+
+  return getEnrichedGroupRoom(roomId, adminId);
 }

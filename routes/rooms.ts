@@ -6,10 +6,15 @@
 //
 // Old contract: { success, directRooms: DirectChatRoomDTO[] }
 // New contract: { success, rooms: (DirectChatRoomDTO | GroupChatRoomDTO)[] }
+//
+// Avatars: profiles now store avatar_public_id, not a finished URL.
+// Every profile fetched here goes through getSignedAvatarUrl() before
+// it's placed on a DTO — see profile.service.ts for why.
 // ============================================================
 import express from 'express';
 import { createUserClient } from '../config/supabase.js';
 import authMiddleware from '../middleware/auth.js';
+import { getSignedAvatarUrl } from '../config/cloudinary.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -43,7 +48,7 @@ router.get('/rooms', async (req, res) => {
 
     const { data: rooms, error: roomError } = await supabase
       .from('chat_rooms')
-      .select('id, type, name, avatar_url, updated_at')
+      .select('id, type, name, avatar_public_id, description, updated_at') // was: avatar_url
       .in('id', roomIds);
 
     if (roomError) {
@@ -91,8 +96,8 @@ router.get('/rooms', async (req, res) => {
       const { data: otherProfiles, error: otherProfilesError } =
         otherUserIds.length > 0
           ? await supabase
-              .from('profiles')
-              .select('id, username, full_name, avatar_url')
+            .from('profiles')
+            .select('id, username, full_name, avatar_public_id, status')
               .in('id', otherUserIds)
           : { data: [], error: null };
 
@@ -118,7 +123,8 @@ router.get('/rooms', async (req, res) => {
               id: otherProfile.id,
               fullName: otherProfile.full_name,
               username: otherProfile.username,
-              avatarUrl: otherProfile.avatar_url,
+              avatarUrl: getSignedAvatarUrl(otherProfile.avatar_public_id),
+              status: otherProfile.status, // add
             },
           };
         })
@@ -152,7 +158,7 @@ router.get('/rooms', async (req, res) => {
         memberIds.length > 0
           ? await supabase
               .from('profiles')
-              .select('id, username, full_name, avatar_url')
+              .select('id, username, full_name, avatar_public_id, status')
               .in('id', memberIds)
           : { data: [], error: null };
 
@@ -176,7 +182,8 @@ router.get('/rooms', async (req, res) => {
           id: profile.id,
           username: profile.username,
           fullName: profile.full_name,
-          avatarUrl: profile.avatar_url,
+          avatarUrl: getSignedAvatarUrl(profile.avatar_public_id),
+          status: profile.status, // add
           role: p.role,
         });
         participantsByRoom.set(p.room_id, list);
@@ -190,7 +197,8 @@ router.get('/rooms', async (req, res) => {
           currentUserId: userId,
           currentUserRole: myRoleByRoom.get(roomId) ?? 'member',
           name: room?.name ?? 'Unnamed group',
-          avatarUrl: room?.avatar_url ?? null,
+          avatarUrl: getSignedAvatarUrl(room?.avatar_public_id ?? null), // was: room?.avatar_url ?? null
+          description: room?.description ?? null,
           members: participantsByRoom.get(roomId) ?? [],
         };
       });

@@ -2,6 +2,7 @@ import express from 'express';
 import authMiddleware from '../middleware/auth.js';
 import { createUserClient, supabaseSuperUser } from '../config/supabase.js';
 import { getIo } from '../socket/index.js';
+import multer from 'multer';
 import {
   GroupServiceError,
   createGroup,
@@ -9,8 +10,8 @@ import {
   acceptGroupInvite,
   rejectGroupInvite,
   getGroupRosterForInvitee,
+  updateGroup,
 } from '../services/room.service.js';
-
 const router = express.Router();
 router.use(authMiddleware);
 
@@ -291,6 +292,49 @@ router.get('/groups/search', async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: 'Internal server error.' });
+  }
+});
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+// ---------- PATCH /api/groups/:roomId ----------
+// Admin-only. Same single-combined-save shape as PATCH /personal/me —
+// name, description, and/or a new icon all in one multipart request.
+router.patch('/groups/:roomId', upload.single('avatar'), async (req, res) => {
+  try {
+    const adminId = req.userId as string;
+    const adminJWT = req.userJWT as string;
+    const { roomId } = req.params as {
+      roomId: string;
+    };
+    const { name, description } = req.body as {
+      name?: string;
+      description?: string;
+    };
+
+    const room = await updateGroup({
+      roomId,
+      adminId,
+      adminJWT,
+      name,
+      description,
+      avatarBuffer: req.file?.buffer,
+    });
+
+    return res.status(200).json({ success: true, room });
+  } catch (error) {
+    if (error instanceof GroupServiceError) {
+      return res
+        .status(error.status)
+        .json({ success: false, message: error.message });
+    }
+    console.error('Update group error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
   }
 });
 
