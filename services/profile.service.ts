@@ -42,19 +42,20 @@ type RawProfileRow = {
   username: string;
   full_name: string | null;
   avatar_public_id: string | null;
+  avatar_version: string | null;
   [key: string]: unknown;
 };
 
 export function attachSignedAvatarUrl<T extends RawProfileRow>(
   profile: T
-): Omit<T, 'avatar_public_id'> & { avatar_url: string | null } {
-  const { avatar_public_id, ...rest } = profile;
-  return { ...rest, avatar_url: getSignedAvatarUrl(avatar_public_id) };
+): Omit<T, 'avatar_public_id'| 'avatar_version'> & { avatar_url: string | null } {
+  const { avatar_public_id,avatar_version, ...rest } = profile;
+  return { ...rest, avatar_url: getSignedAvatarUrl(avatar_public_id, avatar_version || null) };
 }
 
 export function attachSignedAvatarUrls<T extends RawProfileRow>(
   profiles: T[]
-): (Omit<T, 'avatar_public_id'> & { avatar_url: string | null })[] {
+): (Omit<T, 'avatar_public_id' | 'avatar_version'> & { avatar_url: string | null })[] {
   return profiles.map(attachSignedAvatarUrl);
 }
 
@@ -121,8 +122,9 @@ export async function updateProfile({
   // or fails outright — no orphaned asset, no partial state either way.
   if (avatarBuffer) {
     try {
-      const { public_id } = await uploadAvatarBuffer(avatarBuffer, userId);
+      const { public_id, version } = await uploadAvatarBuffer(avatarBuffer, userId);
       patch.avatar_public_id = public_id;
+      patch.avatar_version = version;
     } catch (err) {
       console.error('Avatar upload error:', err);
       throw new ProfileServiceError(502, 'Failed to upload photo');

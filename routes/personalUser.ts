@@ -68,6 +68,7 @@ router.patch('/me', upload.single('avatar'), async (req, res) => {
       userJWT,
       fullName,
       username,
+      status,
       avatarBuffer: req.file?.buffer,
     });
 

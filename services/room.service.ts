@@ -40,7 +40,7 @@ export class GroupServiceError extends Error {
 async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
   const { data: room, error: roomError } = await supabaseSuperUser
     .from('chat_rooms')
-    .select('id, name, avatar_public_id, description') // was: avatar_url
+    .select('id, name, avatar_public_id, description, avatar_version') // was: avatar_url
     .eq('id', roomId)
     .single();
 
@@ -61,7 +61,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
   const memberIds = (participants ?? []).map((p) => p.user_id);
   const { data: profiles, error: profilesError } = await supabaseSuperUser
     .from('profiles')
-    .select('id, username, full_name, avatar_public_id') // was: avatar_url
+    .select('id, username, full_name, avatar_public_id, avatar_version') // was: avatar_url
     .in(
       'id',
       memberIds.length > 0
@@ -86,7 +86,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
         id: profile.id,
         username: profile.username,
         fullName: profile.full_name,
-        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id), // was: profile.avatar_url
+        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id, profile.avatar_version), // was: profile.avatar_url
         role: p.role,
       };
     })
@@ -100,7 +100,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
       | 'admin'
       | 'member',
     name: room.name as string,
-    avatarUrl: getSignedAvatarUrl(room.avatar_public_id), // was: room.avatar_url
+    avatarUrl: getSignedAvatarUrl(room.avatar_public_id, room.avatar_version), // was: room.avatar_url
     description: room.description as string | null,
     members,
   };
@@ -456,7 +456,7 @@ export async function getGroupRosterForInvitee(roomId: string) {
 
   const { data: profiles, error: profilesError } = await supabaseSuperUser
     .from('profiles')
-    .select('id, username, full_name, avatar_public_id') // was: avatar_url
+    .select('id, username, full_name, avatar_public_id, avatar_version') // was: avatar_url
     .in(
       'id',
       allIds.length > 0 ? allIds : ['00000000-0000-0000-0000-000000000000']
@@ -477,7 +477,7 @@ export async function getGroupRosterForInvitee(roomId: string) {
         userId: profile.id,
         username: profile.username,
         fullName: profile.full_name,
-        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id), // was: profile.avatar_url
+        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id, profile.avatar_version), // was: profile.avatar_url
         status: memberIdSet.has(id)
           ? ('accepted' as const)
           : ('pending' as const),

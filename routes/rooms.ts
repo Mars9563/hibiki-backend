@@ -48,7 +48,7 @@ router.get('/rooms', async (req, res) => {
 
     const { data: rooms, error: roomError } = await supabase
       .from('chat_rooms')
-      .select('id, type, name, avatar_public_id, description, updated_at') // was: avatar_url
+      .select('id, type, name, avatar_public_id, description, updated_at, avatar_version') // was: avatar_url
       .in('id', roomIds);
 
     if (roomError) {
@@ -97,7 +97,7 @@ router.get('/rooms', async (req, res) => {
         otherUserIds.length > 0
           ? await supabase
             .from('profiles')
-            .select('id, username, full_name, avatar_public_id, status')
+            .select('id, username, full_name, avatar_public_id, status, avatar_version')
               .in('id', otherUserIds)
           : { data: [], error: null };
 
@@ -123,7 +123,7 @@ router.get('/rooms', async (req, res) => {
               id: otherProfile.id,
               fullName: otherProfile.full_name,
               username: otherProfile.username,
-              avatarUrl: getSignedAvatarUrl(otherProfile.avatar_public_id),
+              avatarUrl: getSignedAvatarUrl(otherProfile.avatar_public_id, otherProfile.avatar_version),
               status: otherProfile.status, // add
             },
           };
@@ -158,7 +158,7 @@ router.get('/rooms', async (req, res) => {
         memberIds.length > 0
           ? await supabase
               .from('profiles')
-              .select('id, username, full_name, avatar_public_id, status')
+              .select('id, username, full_name, avatar_public_id, status, avatar_version')
               .in('id', memberIds)
           : { data: [], error: null };
 
@@ -182,7 +182,7 @@ router.get('/rooms', async (req, res) => {
           id: profile.id,
           username: profile.username,
           fullName: profile.full_name,
-          avatarUrl: getSignedAvatarUrl(profile.avatar_public_id),
+          avatarUrl: getSignedAvatarUrl(profile.avatar_public_id, profile.avatar_version),
           status: profile.status, // add
           role: p.role,
         });
@@ -197,7 +197,7 @@ router.get('/rooms', async (req, res) => {
           currentUserId: userId,
           currentUserRole: myRoleByRoom.get(roomId) ?? 'member',
           name: room?.name ?? 'Unnamed group',
-          avatarUrl: getSignedAvatarUrl(room?.avatar_public_id ?? null), // was: room?.avatar_url ?? null
+          avatarUrl: getSignedAvatarUrl(room?.avatar_public_id ?? null, room?.avatar_version), // was: room?.avatar_url ?? null
           description: room?.description ?? null,
           members: participantsByRoom.get(roomId) ?? [],
         };

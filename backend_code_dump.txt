@@ -6,6 +6,7 @@
 ├── app.ts
 ├── backend_code_dump.txt
 ├── config
+│   ├── cloudinary.ts
 │   └── supabase.ts
 ├── fly.toml
 ├── index.ts
@@ -21,7 +22,7 @@
 │   ├── rooms.ts
 │   └── userMessages.ts
 ├── services
-│   ├── friendship.service.ts
+│   ├── profile.service.ts
 │   └── room.service.ts
 ├── socket
 │   ├── auth.ts
@@ -64,6 +65,114 @@ app.get('/', (req, res) => {
 });
 export default app;
 
+
+==================================================
+FILE: ./config/cloudinary.ts
+==================================================
+// ============================================================
+// config/cloudinary.ts
+// Single place that knows how to talk to Cloudinary. Avatars are
+// uploaded with type: 'authenticated' (not publicly listable or
+// guessable) and delivered via signed URLs generated here — nothing
+// else in the codebase should import the `cloudinary` package
+// directly.
+// ============================================================
+import { v2 as cloudinary } from 'cloudinary';
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+export { cloudinary };
+
+// One deterministic public_id per user. Re-uploading always targets
+// this same id with overwrite:true, so there is never a second,
+// orphaned image left behind in the cloud — nothing to separately
+// delete, nothing to track.
+export function avatarPublicId(userId: string) {
+  return `avatars/${userId}`;
+}
+
+// Signed delivery URL for a private ("authenticated" type) asset.
+// Cloudinary signs this with your API secret — no extra dashboard
+// setup required (that's only needed for the stricter, expiring
+// auth_token feature, which we don't need here: the asset itself is
+// access_mode 'authenticated', so the signature is what gates access
+// at all, not a time window). Re-derived fresh on every profile read
+// (GET /me, GET /rooms, etc) rather than cached in the database.
+export function getSignedAvatarUrl(
+  publicId: string | null | undefined
+): string | null {
+  if (!publicId) return null;
+
+  return cloudinary.url(publicId, {
+    type: 'authenticated',
+    sign_url: true,
+    secure: true,
+    transformation: [{ width: 512, height: 512, crop: 'fill' }],
+  });
+}
+
+// Upload a buffer (already-cropped square JPEG from the client) to
+// the user's fixed avatar slot. overwrite:true means a re-upload
+// replaces the previous asset in place — no separate delete call,
+// no race between "delete old" and "save new".
+export function uploadAvatarBuffer(
+  buffer: Buffer,
+  userId: string
+): Promise<{ public_id: string }> {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        public_id: avatarPublicId(userId),
+        type: 'authenticated',
+        overwrite: true,
+        invalidate: true,
+        resource_type: 'image',
+      },
+      (error, result) => {
+        if (error || !result) {
+          return reject(error || new Error('Cloudinary upload failed'));
+        }
+        resolve({ public_id: result.public_id });
+      }
+    );
+    stream.end(buffer);
+  });
+}
+
+// One deterministic public_id per group, same overwrite-in-place
+// pattern as avatars — re-uploading a group icon just replaces the
+// previous one, no orphaned asset.
+export function groupAvatarPublicId(roomId: string) {
+  return `groups/${roomId}`;
+}
+
+export function uploadGroupAvatarBuffer(
+  buffer: Buffer,
+  roomId: string
+): Promise<{ public_id: string }> {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        public_id: groupAvatarPublicId(roomId),
+        type: 'authenticated',
+        overwrite: true,
+        invalidate: true,
+        resource_type: 'image',
+      },
+      (error, result) => {
+        if (error || !result) {
+          return reject(error || new Error('Cloudinary upload failed'));
+        }
+        resolve({ public_id: result.public_id });
+      }
+    );
+    stream.end(buffer);
+  });
+}
 
 ==================================================
 FILE: ./config/supabase.ts
@@ -188,13 +297,16 @@ FILE: ./package.json
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.95.3",
+    "@types/multer": "^2.1.0",
+    "cloudinary": "^2.10.0",
     "cors": "^2.8.6",
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
+    "multer": "^2.2.0",
     "socket.io": "^4.8.3",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "zod": "^4.3.6",
-    "tsx": "^4.21.0"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
@@ -361,6 +473,7 @@ import express from 'express';
 import authMiddleware from '../middleware/auth.js';
 import { createUserClient, supabaseSuperUser } from '../config/supabase.js';
 import { getIo } from '../socket/index.js';
+import { getSignedAvatarUrl } from '../config/cloudinary.js';
 const router = express.Router();
 
 router.use(authMiddleware);
@@ -392,7 +505,7 @@ router.get('/search', async (req, res) => {
 
     const { data: profiles, error } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_url')
+      .select('id, username, full_name, avatar_public_id') // was: avatar_url
       .ilike('username', `%${q}%`)
       .limit(10);
 
@@ -404,13 +517,14 @@ router.get('/search', async (req, res) => {
     }
 
     // 3️⃣ Filter out excluded users
-    const results = profiles?.filter((profile) => {
-      const excluded = excludedIds.has(profile.id);
-      console.log(
-        `🔍 [SEARCH] Profile ${profile.username} (${profile.id}) excluded: ${excluded}`
-      );
-      return !excluded;
-    });
+    const results = profiles
+      ?.filter((profile) => !excludedIds.has(profile.id))
+      .map((p) => ({
+        id: p.id,
+        username: p.username,
+        full_name: p.full_name,
+        avatar_url: getSignedAvatarUrl(p.avatar_public_id),
+      }));
 
     return res.status(200).json({
       success: true,
@@ -469,14 +583,7 @@ router.get('/pending', async (req, res) => {
     // 3️⃣ Fetch profiles manually
     const { data: profiles, error: profileError } = await supabase
       .from('profiles')
-      .select(
-        `
-        id,
-        username,
-        full_name,
-        avatar_url
-      `
-      )
+      .select('id, username, full_name, avatar_public_id') // was: avatar_url
       .in('id', userIds);
 
     if (profileError) {
@@ -488,7 +595,12 @@ router.get('/pending', async (req, res) => {
     }
 
     // 4️⃣ Create lookup map
-    const profileMap = Object.fromEntries(profiles.map((p) => [p.id, p]));
+    const profileMap = Object.fromEntries(
+      profiles.map((p) => [
+        p.id,
+        { ...p, avatar_url: getSignedAvatarUrl(p.avatar_public_id) },
+      ])
+    );
 
     // 5️⃣ Enrich friendships
     const enriched = friendships.map((f) => ({
@@ -535,7 +647,7 @@ router.post('/request', async (req, res) => {
     // trip from the frontend.
     const { data: targetProfile } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_url')
+      .select('id, username, full_name, avatar_public_id') // was: avatar_url
       .eq('id', targetId)
       .maybeSingle();
 
@@ -584,7 +696,7 @@ router.post('/request', async (req, res) => {
     // straight into sentPending with zero guessing.
     const { data: requesterProfile } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_url')
+      .select('id, username, full_name, avatar_public_id') // was: avatar_url
       .eq('id', requesterId)
       .maybeSingle();
 
@@ -600,8 +712,18 @@ router.post('/request', async (req, res) => {
       message: 'Friend request sent successfully',
       friendship: {
         ...friendship,
-        requester: requesterProfile,
-        addressee: targetProfile,
+        requester: requesterProfile
+          ? {
+              ...requesterProfile,
+              avatar_url: getSignedAvatarUrl(requesterProfile.avatar_public_id),
+            }
+          : null,
+        addressee: targetProfile
+          ? {
+              ...targetProfile,
+              avatar_url: getSignedAvatarUrl(targetProfile.avatar_public_id),
+            }
+          : null,
       },
     });
   } catch (error) {
@@ -789,6 +911,7 @@ import express from 'express';
 import authMiddleware from '../middleware/auth.js';
 import { createUserClient, supabaseSuperUser } from '../config/supabase.js';
 import { getIo } from '../socket/index.js';
+import multer from 'multer';
 import {
   GroupServiceError,
   createGroup,
@@ -796,8 +919,8 @@ import {
   acceptGroupInvite,
   rejectGroupInvite,
   getGroupRosterForInvitee,
+  updateGroup,
 } from '../services/room.service.js';
-
 const router = express.Router();
 router.use(authMiddleware);
 
@@ -1081,6 +1204,49 @@ router.get('/groups/search', async (req, res) => {
   }
 });
 
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+// ---------- PATCH /api/groups/:roomId ----------
+// Admin-only. Same single-combined-save shape as PATCH /personal/me —
+// name, description, and/or a new icon all in one multipart request.
+router.patch('/groups/:roomId', upload.single('avatar'), async (req, res) => {
+  try {
+    const adminId = req.userId as string;
+    const adminJWT = req.userJWT as string;
+    const { roomId } = req.params as {
+      roomId: string;
+    };
+    const { name, description } = req.body as {
+      name?: string;
+      description?: string;
+    };
+
+    const room = await updateGroup({
+      roomId,
+      adminId,
+      adminJWT,
+      name,
+      description,
+      avatarBuffer: req.file?.buffer,
+    });
+
+    return res.status(200).json({ success: true, room });
+  } catch (error) {
+    if (error instanceof GroupServiceError) {
+      return res
+        .status(error.status)
+        .json({ success: false, message: error.message });
+    }
+    console.error('Update group error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
+  }
+});
+
 export default router;
 
 
@@ -1088,11 +1254,27 @@ export default router;
 FILE: ./routes/personalUser.ts
 ==================================================
 import express from 'express';
+import multer from 'multer';
 import authMiddleware from '../middleware/auth.js';
 import { createUserClient } from '../config/supabase.js';
+import {
+  ProfileServiceError,
+  attachSignedAvatarUrl,
+  updateProfile,
+} from '../services/profile.service.js';
+
 const router = express.Router();
 router.use(authMiddleware);
 
+// In-memory storage — the file never touches disk, it's piped
+// straight to Cloudinary inside uploadAvatarBuffer(). Cap matches
+// the limit already enforced client-side in the crop dialog.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+// ---------- GET /api/personal/me ----------
 router.get('/me', async (req, res) => {
   try {
     const supabase = createUserClient(req.userJWT ?? '');
@@ -1100,11 +1282,61 @@ router.get('/me', async (req, res) => {
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
-      .eq('id', req.userId);
+      .eq('id', req.userId)
+      .single();
 
-    res.status(200).json(data);
+    if (error || !data) {
+      return res
+        .status(404)
+        .json({ success: false, message: 'Profile not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      profile: attachSignedAvatarUrl(data),
+    });
   } catch (error) {
-    console.log(error);
+    console.error('Get profile error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// ---------- PATCH /api/personal/me ----------
+// Single combined save: name, username, and/or a new avatar all go
+// through in one multipart request and one DB write. The image
+// field (if present) is optional — text-only edits skip the upload
+// path in profile.service.ts entirely.
+router.patch('/me', upload.single('avatar'), async (req, res) => {
+  try {
+    const userId = req.userId as string;
+    const userJWT = req.userJWT as string;
+    const { fullName, username, status } = req.body as {
+      fullName?: string;
+      username?: string;
+      status?: string;
+    };
+
+    const profile = await updateProfile({
+      userId,
+      userJWT,
+      fullName,
+      username,
+      avatarBuffer: req.file?.buffer,
+    });
+
+    return res.status(200).json({ success: true, profile });
+  } catch (error) {
+    if (error instanceof ProfileServiceError) {
+      return res
+        .status(error.status)
+        .json({ success: false, message: error.message });
+    }
+    console.error('Update profile error:', error);
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error' });
   }
 });
 
@@ -1122,10 +1354,15 @@ FILE: ./routes/rooms.ts
 //
 // Old contract: { success, directRooms: DirectChatRoomDTO[] }
 // New contract: { success, rooms: (DirectChatRoomDTO | GroupChatRoomDTO)[] }
+//
+// Avatars: profiles now store avatar_public_id, not a finished URL.
+// Every profile fetched here goes through getSignedAvatarUrl() before
+// it's placed on a DTO — see profile.service.ts for why.
 // ============================================================
 import express from 'express';
 import { createUserClient } from '../config/supabase.js';
 import authMiddleware from '../middleware/auth.js';
+import { getSignedAvatarUrl } from '../config/cloudinary.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -1159,7 +1396,7 @@ router.get('/rooms', async (req, res) => {
 
     const { data: rooms, error: roomError } = await supabase
       .from('chat_rooms')
-      .select('id, type, name, avatar_url, updated_at')
+      .select('id, type, name, avatar_public_id, description, updated_at') // was: avatar_url
       .in('id', roomIds);
 
     if (roomError) {
@@ -1207,8 +1444,8 @@ router.get('/rooms', async (req, res) => {
       const { data: otherProfiles, error: otherProfilesError } =
         otherUserIds.length > 0
           ? await supabase
-              .from('profiles')
-              .select('id, username, full_name, avatar_url')
+            .from('profiles')
+            .select('id, username, full_name, avatar_public_id, status')
               .in('id', otherUserIds)
           : { data: [], error: null };
 
@@ -1234,7 +1471,8 @@ router.get('/rooms', async (req, res) => {
               id: otherProfile.id,
               fullName: otherProfile.full_name,
               username: otherProfile.username,
-              avatarUrl: otherProfile.avatar_url,
+              avatarUrl: getSignedAvatarUrl(otherProfile.avatar_public_id),
+              status: otherProfile.status, // add
             },
           };
         })
@@ -1268,7 +1506,7 @@ router.get('/rooms', async (req, res) => {
         memberIds.length > 0
           ? await supabase
               .from('profiles')
-              .select('id, username, full_name, avatar_url')
+              .select('id, username, full_name, avatar_public_id, status')
               .in('id', memberIds)
           : { data: [], error: null };
 
@@ -1292,7 +1530,8 @@ router.get('/rooms', async (req, res) => {
           id: profile.id,
           username: profile.username,
           fullName: profile.full_name,
-          avatarUrl: profile.avatar_url,
+          avatarUrl: getSignedAvatarUrl(profile.avatar_public_id),
+          status: profile.status, // add
           role: p.role,
         });
         participantsByRoom.set(p.room_id, list);
@@ -1306,7 +1545,8 @@ router.get('/rooms', async (req, res) => {
           currentUserId: userId,
           currentUserRole: myRoleByRoom.get(roomId) ?? 'member',
           name: room?.name ?? 'Unnamed group',
-          avatarUrl: room?.avatar_url ?? null,
+          avatarUrl: getSignedAvatarUrl(room?.avatar_public_id ?? null), // was: room?.avatar_url ?? null
+          description: room?.description ?? null,
           members: participantsByRoom.get(roomId) ?? [],
         };
       });
@@ -1429,8 +1669,162 @@ export default router;
 
 
 ==================================================
-FILE: ./services/friendship.service.ts
+FILE: ./services/profile.service.ts
 ==================================================
+// ============================================================
+// services/profile.service.ts
+// Profile update business logic, kept out of routes/personalUser.ts
+// so the route stays a thin HTTP <-> service translation layer
+// (same split used in room.service.ts).
+//
+// `profiles` has a working user-scoped UPDATE policy (RLS lets a
+// user update their own row), so this uses createUserClient rather
+// than supabaseSuperUser — least privilege where it's available,
+// same reasoning documented at the top of room.service.ts.
+//
+// Avatars: the column actually stored is `avatar_public_id`, not a
+// finished URL. Every read site (this file, room.service.ts,
+// rooms.ts, friendships.ts) must run raw profile rows through
+// attachSignedAvatarUrl()/attachSignedAvatarUrls() below rather than
+// trusting any URL coming straight out of the database — that's the
+// one rule that keeps signed delivery working everywhere a profile
+// shows up.
+// ============================================================
+import { createUserClient } from '../config/supabase.js';
+import {
+  getSignedAvatarUrl,
+  uploadAvatarBuffer,
+} from '../config/cloudinary.js';
+
+export class ProfileServiceError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+const USERNAME_REGEX = /^[_a-zA-Z][a-zA-Z0-9._]{2,19}$/;
+
+// ---------- Shared signed-URL enrichment ----------
+// Use these instead of reading avatar_public_id/avatar_url directly
+// from any `profiles` row, anywhere in the backend.
+
+type RawProfileRow = {
+  id: string;
+  username: string;
+  full_name: string | null;
+  avatar_public_id: string | null;
+  [key: string]: unknown;
+};
+
+export function attachSignedAvatarUrl<T extends RawProfileRow>(
+  profile: T
+): Omit<T, 'avatar_public_id'> & { avatar_url: string | null } {
+  const { avatar_public_id, ...rest } = profile;
+  return { ...rest, avatar_url: getSignedAvatarUrl(avatar_public_id) };
+}
+
+export function attachSignedAvatarUrls<T extends RawProfileRow>(
+  profiles: T[]
+): (Omit<T, 'avatar_public_id'> & { avatar_url: string | null })[] {
+  return profiles.map(attachSignedAvatarUrl);
+}
+
+// ---------- Update ----------
+
+export type UpdateProfileInput = {
+  userId: string;
+  userJWT: string;
+  fullName?: string;
+  username?: string;
+  status?: string;
+  avatarBuffer?: Buffer;
+};
+
+export async function updateProfile({
+  userId,
+  userJWT,
+  fullName,
+  username,
+  status,
+  avatarBuffer,
+}: UpdateProfileInput) {
+  const patch: Record<string, string> = {};
+
+  if (fullName !== undefined) {
+    const trimmed = fullName.trim();
+    if (!trimmed) {
+      throw new ProfileServiceError(400, 'Name is required');
+    }
+    if (trimmed.length > 255) {
+      throw new ProfileServiceError(
+        400,
+        'Name must be 255 characters or fewer'
+      );
+    }
+    patch.full_name = trimmed;
+  }
+
+  if (username !== undefined) {
+    const trimmed = username.trim();
+    if (!USERNAME_REGEX.test(trimmed)) {
+      throw new ProfileServiceError(
+        400,
+        'Username must start with a letter or underscore and contain only letters, numbers, dots, or underscores (3–20 chars).'
+      );
+    }
+    patch.username = trimmed;
+  }
+
+  if (status !== undefined) {
+    const trimmed = status.trim();
+    if (trimmed.length > 150) {
+      throw new ProfileServiceError(
+        400,
+        'Status must be 150 characters or fewer'
+      );
+    }
+    patch.status = trimmed;
+  }
+
+  // Upload happens before the DB write so a failed upload never
+  // leaves the row half-updated. overwrite:true on a fixed
+  // public_id means this either fully replaces the previous avatar
+  // or fails outright — no orphaned asset, no partial state either way.
+  if (avatarBuffer) {
+    try {
+      const { public_id } = await uploadAvatarBuffer(avatarBuffer, userId);
+      patch.avatar_public_id = public_id;
+    } catch (err) {
+      console.error('Avatar upload error:', err);
+      throw new ProfileServiceError(502, 'Failed to upload photo');
+    }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    throw new ProfileServiceError(400, 'No fields to update');
+  }
+
+  const supabase = createUserClient(userJWT);
+
+  // Username has a UNIQUE constraint — Postgres 23505 on conflict.
+  const { data, error } = await supabase
+    .from('profiles')
+    .update(patch)
+    .eq('id', userId)
+    .select()
+    .single();
+
+  if (error) {
+    if (error.code === '23505') {
+      throw new ProfileServiceError(409, 'That username is already taken');
+    }
+    throw new ProfileServiceError(500, 'Failed to update profile');
+  }
+
+  return attachSignedAvatarUrl(data as RawProfileRow);
+}
 
 
 ==================================================
@@ -1456,6 +1850,10 @@ FILE: ./services/room.service.ts
 // that route here; just making sure groups doesn't repeat it).
 // ============================================================
 import { createUserClient, supabaseSuperUser } from '../config/supabase.js';
+import {
+  getSignedAvatarUrl,
+  uploadGroupAvatarBuffer,
+} from '../config/cloudinary.js';
 
 export class GroupServiceError extends Error {
   status: number;
@@ -1474,7 +1872,7 @@ export class GroupServiceError extends Error {
 async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
   const { data: room, error: roomError } = await supabaseSuperUser
     .from('chat_rooms')
-    .select('id, name, avatar_url')
+    .select('id, name, avatar_public_id, description') // was: avatar_url
     .eq('id', roomId)
     .single();
 
@@ -1495,7 +1893,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
   const memberIds = (participants ?? []).map((p) => p.user_id);
   const { data: profiles, error: profilesError } = await supabaseSuperUser
     .from('profiles')
-    .select('id, username, full_name, avatar_url')
+    .select('id, username, full_name, avatar_public_id') // was: avatar_url
     .in(
       'id',
       memberIds.length > 0
@@ -1520,7 +1918,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
         id: profile.id,
         username: profile.username,
         fullName: profile.full_name,
-        avatarUrl: profile.avatar_url,
+        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id), // was: profile.avatar_url
         role: p.role,
       };
     })
@@ -1534,7 +1932,8 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
       | 'admin'
       | 'member',
     name: room.name as string,
-    avatarUrl: room.avatar_url as string | null,
+    avatarUrl: getSignedAvatarUrl(room.avatar_public_id), // was: room.avatar_url
+    description: room.description as string | null,
     members,
   };
 }
@@ -1889,7 +2288,7 @@ export async function getGroupRosterForInvitee(roomId: string) {
 
   const { data: profiles, error: profilesError } = await supabaseSuperUser
     .from('profiles')
-    .select('id, username, full_name, avatar_url')
+    .select('id, username, full_name, avatar_public_id') // was: avatar_url
     .in(
       'id',
       allIds.length > 0 ? allIds : ['00000000-0000-0000-0000-000000000000']
@@ -1910,7 +2309,7 @@ export async function getGroupRosterForInvitee(roomId: string) {
         userId: profile.id,
         username: profile.username,
         fullName: profile.full_name,
-        avatarUrl: profile.avatar_url,
+        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id), // was: profile.avatar_url
         status: memberIdSet.has(id)
           ? ('accepted' as const)
           : ('pending' as const),
@@ -1919,6 +2318,91 @@ export async function getGroupRosterForInvitee(roomId: string) {
     .filter((r): r is GroupInviteStatusInfo => r !== null);
 
   return roster;
+}
+
+type UpdateGroupParams = {
+  roomId: string;
+  adminId: string;
+  adminJWT: string;
+  name?: string;
+  description?: string;
+  avatarBuffer?: Buffer;
+};
+
+export async function updateGroup({
+  roomId,
+  adminId,
+  adminJWT,
+  name,
+  description,
+  avatarBuffer,
+}: UpdateGroupParams) {
+  const userClient = createUserClient(adminJWT);
+
+  // Confirm admin role explicitly before doing any work — the RLS
+  // policy enforces this too, but checking here lets us return a
+  // clean 403 with a real message instead of a silent "0 rows
+  // updated" from Postgres.
+  const { data: membership, error: membershipError } = await userClient
+    .from('chat_room_participants')
+    .select('role')
+    .eq('room_id', roomId)
+    .eq('user_id', adminId)
+    .maybeSingle();
+
+  if (membershipError) {
+    console.error('updateGroup membership check error:', membershipError);
+    throw new GroupServiceError(500, 'Server error');
+  }
+
+  if (!membership || membership.role !== 'admin') {
+    throw new GroupServiceError(403, 'Only admins can edit this group');
+  }
+
+  const patch: Record<string, string> = {};
+
+  if (name !== undefined) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw new GroupServiceError(400, 'Group name is required');
+    }
+    patch.name = trimmed;
+  }
+
+  if (description !== undefined) {
+    patch.description = description.trim();
+  }
+
+  if (avatarBuffer) {
+    try {
+      const { public_id } = await uploadGroupAvatarBuffer(avatarBuffer, roomId);
+      patch.avatar_public_id = public_id;
+    } catch (err) {
+      console.error('Group avatar upload error:', err);
+      throw new GroupServiceError(502, 'Failed to upload group photo');
+    }
+  }
+
+  if (Object.keys(patch).length === 0) {
+    throw new GroupServiceError(400, 'No fields to update');
+  }
+
+  // chat_rooms has no UPDATE policy for normal users today except the
+  // new admin-scoped one — this still goes through supabaseSuperUser
+  // for consistency with every other chat_rooms write in this file
+  // (see the trust-boundary note at the top), with the role check
+  // above doing the actual authorization.
+  const { error: updateError } = await supabaseSuperUser
+    .from('chat_rooms')
+    .update(patch)
+    .eq('id', roomId);
+
+  if (updateError) {
+    console.error('updateGroup update error:', updateError);
+    throw new GroupServiceError(500, 'Failed to update group');
+  }
+
+  return getEnrichedGroupRoom(roomId, adminId);
 }
 
 ==================================================

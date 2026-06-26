@@ -32,7 +32,8 @@ export function avatarPublicId(userId: string) {
 // at all, not a time window). Re-derived fresh on every profile read
 // (GET /me, GET /rooms, etc) rather than cached in the database.
 export function getSignedAvatarUrl(
-  publicId: string | null | undefined
+  publicId: string | null | undefined,
+  version: string | null // 👈 Added optional version argument
 ): string | null {
   if (!publicId) return null;
 
@@ -41,8 +42,10 @@ export function getSignedAvatarUrl(
     sign_url: true,
     secure: true,
     transformation: [{ width: 512, height: 512, crop: 'fill' }],
+    version: version || '', // 👈 Uses database version, falls back to "" if missing
   });
 }
+
 
 // Upload a buffer (already-cropped square JPEG from the client) to
 // the user's fixed avatar slot. overwrite:true means a re-upload
@@ -51,7 +54,8 @@ export function getSignedAvatarUrl(
 export function uploadAvatarBuffer(
   buffer: Buffer,
   userId: string
-): Promise<{ public_id: string }> {
+): Promise<{ public_id: string; version: string }> {
+  // 👈 Added version here
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
@@ -65,7 +69,11 @@ export function uploadAvatarBuffer(
         if (error || !result) {
           return reject(error || new Error('Cloudinary upload failed'));
         }
-        resolve({ public_id: result.public_id });
+        // 👇 Return the string version from the result
+        resolve({
+          public_id: result.public_id,
+          version: result.version.toString(),
+        });
       }
     );
     stream.end(buffer);
@@ -82,7 +90,8 @@ export function groupAvatarPublicId(roomId: string) {
 export function uploadGroupAvatarBuffer(
   buffer: Buffer,
   roomId: string
-): Promise<{ public_id: string }> {
+): Promise<{ public_id: string; version: string }> {
+  // 👈 Added version here
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
@@ -96,7 +105,11 @@ export function uploadGroupAvatarBuffer(
         if (error || !result) {
           return reject(error || new Error('Cloudinary upload failed'));
         }
-        resolve({ public_id: result.public_id });
+        // 👇 Return the string version from the result
+        resolve({
+          public_id: result.public_id,
+          version: result.version.toString(),
+        });
       }
     );
     stream.end(buffer);
