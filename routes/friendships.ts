@@ -3,6 +3,10 @@ import authMiddleware from '../middleware/auth.js';
 import { createUserClient, supabaseSuperUser } from '../config/supabase.js';
 import { getIo } from '../socket/index.js';
 import { getSignedAvatarUrl } from '../config/cloudinary.js';
+import {
+  attachSignedAvatarUrl,
+  attachSignedAvatarUrls,
+} from '../services/profile.service.js';
 const router = express.Router();
 
 router.use(authMiddleware);
@@ -34,7 +38,7 @@ router.get('/search', async (req, res) => {
 
     const { data: profiles, error } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_public_id') // was: avatar_url
+      .select('id, username, full_name, avatar_public_id, avatar_version') // was: avatar_url
       .ilike('username', `%${q}%`)
       .limit(10);
 
@@ -46,14 +50,9 @@ router.get('/search', async (req, res) => {
     }
 
     // 3️⃣ Filter out excluded users
-    const results = profiles
-      ?.filter((profile) => !excludedIds.has(profile.id))
-      .map((p) => ({
-        id: p.id,
-        username: p.username,
-        full_name: p.full_name,
-        avatar_url: getSignedAvatarUrl(p.avatar_public_id),
-      }));
+    const results = attachSignedAvatarUrls(
+      (profiles ?? []).filter((profile) => !excludedIds.has(profile.id))
+    );
 
     return res.status(200).json({
       success: true,
@@ -112,7 +111,7 @@ router.get('/pending', async (req, res) => {
     // 3️⃣ Fetch profiles manually
     const { data: profiles, error: profileError } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_public_id') // was: avatar_url
+      .select('id, username, full_name, avatar_public_id, avatar_version') // was: avatar_url
       .in('id', userIds);
 
     if (profileError) {
@@ -125,10 +124,7 @@ router.get('/pending', async (req, res) => {
 
     // 4️⃣ Create lookup map
     const profileMap = Object.fromEntries(
-      profiles.map((p) => [
-        p.id,
-        { ...p, avatar_url: getSignedAvatarUrl(p.avatar_public_id) },
-      ])
+      attachSignedAvatarUrls(profiles ?? []).map((p) => [p.id, p])
     );
 
     // 5️⃣ Enrich friendships
@@ -176,7 +172,7 @@ router.post('/request', async (req, res) => {
     // trip from the frontend.
     const { data: targetProfile } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_public_id') // was: avatar_url
+      .select('id, username, full_name, avatar_public_id, avatar_version') // was: avatar_url
       .eq('id', targetId)
       .maybeSingle();
 
@@ -225,7 +221,7 @@ router.post('/request', async (req, res) => {
     // straight into sentPending with zero guessing.
     const { data: requesterProfile } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_public_id') // was: avatar_url
+      .select('id, username, full_name, avatar_public_id, avatar_version') // was: avatar_url
       .eq('id', requesterId)
       .maybeSingle();
 
@@ -242,17 +238,9 @@ router.post('/request', async (req, res) => {
       friendship: {
         ...friendship,
         requester: requesterProfile
-          ? {
-              ...requesterProfile,
-              avatar_url: getSignedAvatarUrl(requesterProfile.avatar_public_id),
-            }
+          ? attachSignedAvatarUrl(requesterProfile)
           : null,
-        addressee: targetProfile
-          ? {
-              ...targetProfile,
-              avatar_url: getSignedAvatarUrl(targetProfile.avatar_public_id),
-            }
-          : null,
+        addressee: targetProfile ? attachSignedAvatarUrl(targetProfile) : null,
       },
     });
   } catch (error) {

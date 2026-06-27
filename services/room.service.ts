@@ -543,8 +543,12 @@ export async function updateGroup({
 
   if (avatarBuffer) {
     try {
-      const { public_id } = await uploadGroupAvatarBuffer(avatarBuffer, roomId);
+      const { public_id, version } = await uploadGroupAvatarBuffer(
+        avatarBuffer,
+        roomId
+      );
       patch.avatar_public_id = public_id;
+      patch.avatar_version = version; // ← was missing
     } catch (err) {
       console.error('Group avatar upload error:', err);
       throw new GroupServiceError(502, 'Failed to upload group photo');

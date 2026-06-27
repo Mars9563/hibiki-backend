@@ -12,6 +12,8 @@ import {
   getGroupRosterForInvitee,
   updateGroup,
 } from '../services/room.service.js';
+import { getSignedAvatarUrl } from '../config/cloudinary.js';
+import { attachSignedAvatarUrls } from '../services/profile.service.js';
 const router = express.Router();
 router.use(authMiddleware);
 
@@ -149,25 +151,45 @@ router.get('/group-invites/pending', async (req, res) => {
     const roomIds = [...new Set(invites.map((i) => i.room_id))];
     const inviterIds = [...new Set(invites.map((i) => i.inviter_id))];
 
-    const [{ data: rooms }, { data: inviters }, rosters] = await Promise.all([
-      // service role: chat_rooms SELECT policy requires the caller to
-      // already be a participant (is_room_participant), but a pending
-      // invitee isn't one yet — user-scoped client silently returns []
-      // here, which is what caused room: undefined downstream.
+    const [
+      { data: rooms, error: roomsError },
+      { data: inviters, error: invitersError },
+      rosters,
+    ] = await Promise.all([
       supabaseSuperUser
         .from('chat_rooms')
-        .select('id, name, avatar_url')
+        .select('id, name, avatar_public_id, avatar_version')
         .in('id', roomIds),
       supabase
         .from('profiles')
-        .select('id, username, full_name, avatar_url')
+        .select('id, username, full_name, avatar_public_id, avatar_version')
         .in('id', inviterIds),
       Promise.all(roomIds.map((id) => getGroupRosterForInvitee(id))),
     ]);
 
-    const roomMap = Object.fromEntries((rooms ?? []).map((r) => [r.id, r]));
+    if (roomsError || invitersError) {
+      console.error(
+        'Group invites pending enrichment error:',
+        roomsError,
+        invitersError
+      );
+      return res
+        .status(500)
+        .json({ success: false, message: 'Failed to fetch invites' });
+    }
+
+    const roomMap = Object.fromEntries(
+      (rooms ?? []).map((r) => [
+        r.id,
+        {
+          id: r.id,
+          name: r.name,
+          avatar_url: getSignedAvatarUrl(r.avatar_public_id, r.avatar_version),
+        },
+      ])
+    );
     const inviterMap = Object.fromEntries(
-      (inviters ?? []).map((p) => [p.id, p])
+      attachSignedAvatarUrls(inviters ?? []).map((p) => [p.id, p])
     );
     const rosterMap = Object.fromEntries(
       roomIds.map((id, i) => [id, rosters[i]])
@@ -274,7 +296,7 @@ router.get('/groups/search', async (req, res) => {
 
     const { data: profiles, error } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_url')
+      .select('id, username, full_name, avatar_public_id, avatar_version')
       .ilike('username', `%${q}%`)
       .neq('id', userId)
       .limit(10);
@@ -286,7 +308,9 @@ router.get('/groups/search', async (req, res) => {
         .json({ success: false, message: 'Search failed.' });
     }
 
-    return res.status(200).json({ success: true, results: profiles ?? [] });
+    return res
+      .status(200)
+      .json({ success: true, results: attachSignedAvatarUrls(profiles ?? []) });
   } catch (error) {
     console.error('Group search route error:', error);
     return res

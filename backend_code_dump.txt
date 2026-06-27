@@ -103,7 +103,8 @@ export function avatarPublicId(userId: string) {
 // at all, not a time window). Re-derived fresh on every profile read
 // (GET /me, GET /rooms, etc) rather than cached in the database.
 export function getSignedAvatarUrl(
-  publicId: string | null | undefined
+  publicId: string | null | undefined,
+  version: string | null // 👈 Added optional version argument
 ): string | null {
   if (!publicId) return null;
 
@@ -112,8 +113,10 @@ export function getSignedAvatarUrl(
     sign_url: true,
     secure: true,
     transformation: [{ width: 512, height: 512, crop: 'fill' }],
+    version: version || '', // 👈 Uses database version, falls back to "" if missing
   });
 }
+
 
 // Upload a buffer (already-cropped square JPEG from the client) to
 // the user's fixed avatar slot. overwrite:true means a re-upload
@@ -122,7 +125,8 @@ export function getSignedAvatarUrl(
 export function uploadAvatarBuffer(
   buffer: Buffer,
   userId: string
-): Promise<{ public_id: string }> {
+): Promise<{ public_id: string; version: string }> {
+  // 👈 Added version here
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
@@ -136,7 +140,11 @@ export function uploadAvatarBuffer(
         if (error || !result) {
           return reject(error || new Error('Cloudinary upload failed'));
         }
-        resolve({ public_id: result.public_id });
+        // 👇 Return the string version from the result
+        resolve({
+          public_id: result.public_id,
+          version: result.version.toString(),
+        });
       }
     );
     stream.end(buffer);
@@ -153,7 +161,8 @@ export function groupAvatarPublicId(roomId: string) {
 export function uploadGroupAvatarBuffer(
   buffer: Buffer,
   roomId: string
-): Promise<{ public_id: string }> {
+): Promise<{ public_id: string; version: string }> {
+  // 👈 Added version here
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
       {
@@ -167,7 +176,11 @@ export function uploadGroupAvatarBuffer(
         if (error || !result) {
           return reject(error || new Error('Cloudinary upload failed'));
         }
-        resolve({ public_id: result.public_id });
+        // 👇 Return the string version from the result
+        resolve({
+          public_id: result.public_id,
+          version: result.version.toString(),
+        });
       }
     );
     stream.end(buffer);
@@ -1323,6 +1336,7 @@ router.patch('/me', upload.single('avatar'), async (req, res) => {
       userJWT,
       fullName,
       username,
+      status,
       avatarBuffer: req.file?.buffer,
     });
 
@@ -1396,7 +1410,7 @@ router.get('/rooms', async (req, res) => {
 
     const { data: rooms, error: roomError } = await supabase
       .from('chat_rooms')
-      .select('id, type, name, avatar_public_id, description, updated_at') // was: avatar_url
+      .select('id, type, name, avatar_public_id, description, updated_at, avatar_version') // was: avatar_url
       .in('id', roomIds);
 
     if (roomError) {
@@ -1445,7 +1459,7 @@ router.get('/rooms', async (req, res) => {
         otherUserIds.length > 0
           ? await supabase
             .from('profiles')
-            .select('id, username, full_name, avatar_public_id, status')
+            .select('id, username, full_name, avatar_public_id, status, avatar_version')
               .in('id', otherUserIds)
           : { data: [], error: null };
 
@@ -1471,7 +1485,7 @@ router.get('/rooms', async (req, res) => {
               id: otherProfile.id,
               fullName: otherProfile.full_name,
               username: otherProfile.username,
-              avatarUrl: getSignedAvatarUrl(otherProfile.avatar_public_id),
+              avatarUrl: getSignedAvatarUrl(otherProfile.avatar_public_id, otherProfile.avatar_version),
               status: otherProfile.status, // add
             },
           };
@@ -1506,7 +1520,7 @@ router.get('/rooms', async (req, res) => {
         memberIds.length > 0
           ? await supabase
               .from('profiles')
-              .select('id, username, full_name, avatar_public_id, status')
+              .select('id, username, full_name, avatar_public_id, status, avatar_version')
               .in('id', memberIds)
           : { data: [], error: null };
 
@@ -1530,7 +1544,7 @@ router.get('/rooms', async (req, res) => {
           id: profile.id,
           username: profile.username,
           fullName: profile.full_name,
-          avatarUrl: getSignedAvatarUrl(profile.avatar_public_id),
+          avatarUrl: getSignedAvatarUrl(profile.avatar_public_id, profile.avatar_version),
           status: profile.status, // add
           role: p.role,
         });
@@ -1545,7 +1559,7 @@ router.get('/rooms', async (req, res) => {
           currentUserId: userId,
           currentUserRole: myRoleByRoom.get(roomId) ?? 'member',
           name: room?.name ?? 'Unnamed group',
-          avatarUrl: getSignedAvatarUrl(room?.avatar_public_id ?? null), // was: room?.avatar_url ?? null
+          avatarUrl: getSignedAvatarUrl(room?.avatar_public_id ?? null, room?.avatar_version), // was: room?.avatar_url ?? null
           description: room?.description ?? null,
           members: participantsByRoom.get(roomId) ?? [],
         };
@@ -1715,19 +1729,20 @@ type RawProfileRow = {
   username: string;
   full_name: string | null;
   avatar_public_id: string | null;
+  avatar_version: string | null;
   [key: string]: unknown;
 };
 
 export function attachSignedAvatarUrl<T extends RawProfileRow>(
   profile: T
-): Omit<T, 'avatar_public_id'> & { avatar_url: string | null } {
-  const { avatar_public_id, ...rest } = profile;
-  return { ...rest, avatar_url: getSignedAvatarUrl(avatar_public_id) };
+): Omit<T, 'avatar_public_id'| 'avatar_version'> & { avatar_url: string | null } {
+  const { avatar_public_id,avatar_version, ...rest } = profile;
+  return { ...rest, avatar_url: getSignedAvatarUrl(avatar_public_id, avatar_version || null) };
 }
 
 export function attachSignedAvatarUrls<T extends RawProfileRow>(
   profiles: T[]
-): (Omit<T, 'avatar_public_id'> & { avatar_url: string | null })[] {
+): (Omit<T, 'avatar_public_id' | 'avatar_version'> & { avatar_url: string | null })[] {
   return profiles.map(attachSignedAvatarUrl);
 }
 
@@ -1794,8 +1809,9 @@ export async function updateProfile({
   // or fails outright — no orphaned asset, no partial state either way.
   if (avatarBuffer) {
     try {
-      const { public_id } = await uploadAvatarBuffer(avatarBuffer, userId);
+      const { public_id, version } = await uploadAvatarBuffer(avatarBuffer, userId);
       patch.avatar_public_id = public_id;
+      patch.avatar_version = version;
     } catch (err) {
       console.error('Avatar upload error:', err);
       throw new ProfileServiceError(502, 'Failed to upload photo');
@@ -1872,7 +1888,7 @@ export class GroupServiceError extends Error {
 async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
   const { data: room, error: roomError } = await supabaseSuperUser
     .from('chat_rooms')
-    .select('id, name, avatar_public_id, description') // was: avatar_url
+    .select('id, name, avatar_public_id, description, avatar_version') // was: avatar_url
     .eq('id', roomId)
     .single();
 
@@ -1893,7 +1909,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
   const memberIds = (participants ?? []).map((p) => p.user_id);
   const { data: profiles, error: profilesError } = await supabaseSuperUser
     .from('profiles')
-    .select('id, username, full_name, avatar_public_id') // was: avatar_url
+    .select('id, username, full_name, avatar_public_id, avatar_version') // was: avatar_url
     .in(
       'id',
       memberIds.length > 0
@@ -1918,7 +1934,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
         id: profile.id,
         username: profile.username,
         fullName: profile.full_name,
-        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id), // was: profile.avatar_url
+        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id, profile.avatar_version), // was: profile.avatar_url
         role: p.role,
       };
     })
@@ -1932,7 +1948,7 @@ async function getEnrichedGroupRoom(roomId: string, forUserId: string) {
       | 'admin'
       | 'member',
     name: room.name as string,
-    avatarUrl: getSignedAvatarUrl(room.avatar_public_id), // was: room.avatar_url
+    avatarUrl: getSignedAvatarUrl(room.avatar_public_id, room.avatar_version), // was: room.avatar_url
     description: room.description as string | null,
     members,
   };
@@ -2288,7 +2304,7 @@ export async function getGroupRosterForInvitee(roomId: string) {
 
   const { data: profiles, error: profilesError } = await supabaseSuperUser
     .from('profiles')
-    .select('id, username, full_name, avatar_public_id') // was: avatar_url
+    .select('id, username, full_name, avatar_public_id, avatar_version') // was: avatar_url
     .in(
       'id',
       allIds.length > 0 ? allIds : ['00000000-0000-0000-0000-000000000000']
@@ -2309,7 +2325,7 @@ export async function getGroupRosterForInvitee(roomId: string) {
         userId: profile.id,
         username: profile.username,
         fullName: profile.full_name,
-        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id), // was: profile.avatar_url
+        avatarUrl: getSignedAvatarUrl(profile.avatar_public_id, profile.avatar_version), // was: profile.avatar_url
         status: memberIdSet.has(id)
           ? ('accepted' as const)
           : ('pending' as const),
