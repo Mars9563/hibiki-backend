@@ -7,6 +7,7 @@ import {
   attachSignedAvatarUrl,
   updateProfile,
 } from '../services/profile.service.js';
+import { writeLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -53,7 +54,7 @@ router.get('/me', async (req, res) => {
 // through in one multipart request and one DB write. The image
 // field (if present) is optional — text-only edits skip the upload
 // path in profile.service.ts entirely.
-router.patch('/me', upload.single('avatar'), async (req, res) => {
+router.patch('/me',writeLimiter, upload.single('avatar'), async (req, res) => {
   try {
     const userId = req.userId as string;
     const userJWT = req.userJWT as string;

@@ -124,43 +124,27 @@ export async function createGroup({
     throw new GroupServiceError(400, 'Group name is required');
   }
 
-  // De-dupe and drop the creator if they somehow got included —
-  // they're added as a participant directly, never via invite.
   const uniqueInvitees = [...new Set(inviteeIds)].filter(
     (id) => id !== creatorId
   );
 
-  // 1️⃣ Create the room (service role — no INSERT policy on chat_rooms
-  // for normal users, same constraint the direct-room path already
-  // works around). Name must be set in this same insert — the
-  // chat_rooms_name_matches_type check constraint requires a non-empty
-  // name on any row with type = 'group' at insert time, so a bare
-  // insert-then-update sequence violates it before the update runs.
-  const { data: room, error: roomError } = await supabaseSuperUser
-    .from('chat_rooms')
-    .insert({ type: 'group', name: trimmedName })
-    .select()
-    .single();
+  // Room + creator-as-admin, atomically. Previously two separate
+  // calls — if the participant insert failed, you got a room with
+  // zero participants, unreachable by anyone, including its creator.
+  const { data: room, error: roomError } = await supabaseSuperUser.rpc(
+    'create_group_with_creator',
+    { p_creator_id: creatorId, p_name: trimmedName }
+  );
 
   if (roomError || !room) {
-    console.error('createGroup room insert error:', roomError);
+    console.error('createGroup RPC error:', roomError);
     throw new GroupServiceError(500, 'Failed to create group');
   }
 
-  // 2️⃣ Add the creator as the sole initial participant, role admin.
-  // Everyone else joins only by accepting an invite — there is no
-  // "direct add" path, even at creation time.
-  const { error: participantError } = await supabaseSuperUser
-    .from('chat_room_participants')
-    .insert({ room_id: room.id, user_id: creatorId, role: 'admin' });
-
-  if (participantError) {
-    console.error('createGroup participant insert error:', participantError);
-    throw new GroupServiceError(500, 'Failed to create group');
-  }
-
-  // 4️⃣ Insert invite rows for everyone else (user-scoped client —
-  // group_invites already has a working INSERT policy for inviter_id).
+  // Invites stay a separate, best-effort step — deliberately not
+  // part of the atomic core. The group is fully viable with just the
+  // creator, so a failure here shouldn't roll back a room that
+  // already exists and already has someone in it.
   const userClient = createUserClient(creatorJWT);
   let invites: { id: string; invitee_id: string }[] = [];
 
@@ -178,11 +162,6 @@ export async function createGroup({
       .select('id, invitee_id');
 
     if (inviteError) {
-      // Room already exists with the creator in it at this point —
-      // we don't roll that back. The group simply exists with zero
-      // pending invites and the creator can re-invite from the group
-      // settings UI once it's built. Surfacing this as a 500 would be
-      // misleading since the group itself was created successfully.
       console.error('createGroup invite insert error:', inviteError);
       throw new GroupServiceError(
         207,
@@ -193,17 +172,9 @@ export async function createGroup({
     invites = insertedInvites ?? [];
   }
 
-  // Return the enriched shape (roomId/roomType/members[]/etc) — same
-  // contract as acceptGroupInvite, so the frontend's upsertRoom() can
-  // consume either response identically with no translation step. At
-  // this point the only member is the creator, so this resolves to a
-  // single-element members array with role 'admin'.
   const enrichedRoom = await getEnrichedGroupRoom(room.id, creatorId);
 
-  return {
-    room: enrichedRoom,
-    invites,
-  };
+  return { room: enrichedRoom, invites };
 }
 
 type InviteToGroupParams = {

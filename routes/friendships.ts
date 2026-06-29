@@ -252,114 +252,47 @@ router.post('/request',writeLimiter, async (req, res) => {
   }
 });
 
-router.post('/accept',writeLimiter, async (req, res) => {
+router.post('/accept', writeLimiter, async (req, res) => {
   try {
-    const supabase = createUserClient(req.userJWT ?? '');
-
     const accepter_id = req.userId;
     const sender_id = req.body.targetId;
-    // check payload
+
     if (!sender_id)
       return res
         .status(400)
         .json({ success: false, message: 'No targetId found in backend.' });
-    // validate if it is not invalid
+
     if (sender_id === accepter_id)
       return res
         .status(400)
         .json({ success: false, message: 'Can not accept self request.' });
 
-    // check if request is present in the db;
-    const { data: friendship, error } = await supabase
-      .from('friendships')
-      .select('id, status')
-      .match({
-        requester_id: sender_id,
-        addressee_id: accepter_id,
-        status: 'pending',
-      })
-      .single();
-
-    if (error || !friendship)
-      return res
-        .status(404)
-        .json({ success: false, message: 'No such request found;' });
-
-    const { data: updated, error: updateError } = await supabase
-      .from('friendships')
-      .update({ status: 'accepted' })
-      .eq('id', friendship.id)
-      .eq('status', 'pending')
-      .select()
-      .single();
-
-    if (updateError || !updated)
-      return res
-        .status(404)
-        .json({ success: false, message: 'Request alerady handeled.' });
-
-    const pairHash = [sender_id, accepter_id].sort().join('_');
-
-    let room;
-
-    const { data: newRoom, error: roomError } = await supabaseSuperUser
-      .from('chat_rooms')
-      .insert({
-        type: 'direct',
-        direct_pair_hash: pairHash,
-      })
-      .select()
-      .single();
-
-    if (roomError) {
-      if (roomError.code === '23505') {
-        // Unique violation → room already exists
-        const { data: existingRoom, error: fetchError } =
-          await supabaseSuperUser
-            .from('chat_rooms')
-            .select('*')
-            .eq('direct_pair_hash', pairHash)
-            .single();
-
-        if (fetchError || !existingRoom) {
-          throw fetchError || new Error('Failed to fetch existing room');
-        }
-
-        room = existingRoom;
-      } else {
-        throw roomError; // real unexpected error
-      }
-    } else {
-      room = newRoom;
-    }
-
-    // 4️⃣ Insert participants (service role)
-    await supabaseSuperUser.from('chat_room_participants').upsert(
-      [
-        { room_id: room.id, user_id: sender_id },
-        { room_id: room.id, user_id: accepter_id },
-      ],
-      {
-        onConflict: 'room_id,user_id',
-        ignoreDuplicates: true,
-      }
+    const { data: room, error } = await supabaseSuperUser.rpc(
+      'accept_friendship',
+      { p_requester_id: sender_id, p_accepter_id: accepter_id }
     );
 
-    // 5️⃣ Emit to both
-    const io = getIo();
+    if (error || !room) {
+      if (error?.code === 'P0002') {
+        return res
+          .status(404)
+          .json({ success: false, message: 'No pending request found.' });
+      }
+      console.error('Accept friendship RPC error:', error);
+      return res
+        .status(500)
+        .json({ success: false, message: 'Internal server error.' });
+    }
 
+    const io = getIo();
     io.to([sender_id, accepter_id]).emit('friendship:accepted', { room });
 
-    return res.status(200).json({
-      success: true,
-      room,
-    });
+    return res.status(200).json({ success: true, room });
   } catch (error) {
     console.error('Accept error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Internal server error.',
-    });
+    return res
+      .status(500)
+      .json({ success: false, message: 'Internal server error.' });
   }
 });
 
