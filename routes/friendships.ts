@@ -2,15 +2,15 @@ import express from 'express';
 import authMiddleware from '../middleware/auth.js';
 import { createUserClient, supabaseSuperUser } from '../config/supabase.js';
 import { getIo } from '../socket/index.js';
-import { getSignedAvatarUrl } from '../config/cloudinary.js';
 import {
   attachSignedAvatarUrl,
   attachSignedAvatarUrls,
 } from '../services/profile.service.js';
+import { searchLimiter, writeLimiter } from '../middleware/rateLimiter.js';
 const router = express.Router();
 
 router.use(authMiddleware);
-router.get('/search', async (req, res) => {
+router.get('/search',searchLimiter, async (req, res) => {
   try {
     const supabase = createUserClient(req.userJWT ?? '');
     const userId = req.userId;
@@ -147,7 +147,7 @@ router.get('/pending', async (req, res) => {
   }
 });
 
-router.post('/request', async (req, res) => {
+router.post('/request',writeLimiter, async (req, res) => {
   try {
     const supabase = createUserClient(req.userJWT ?? '');
 
@@ -252,7 +252,7 @@ router.post('/request', async (req, res) => {
   }
 });
 
-router.post('/accept', async (req, res) => {
+router.post('/accept',writeLimiter, async (req, res) => {
   try {
     const supabase = createUserClient(req.userJWT ?? '');
 
@@ -363,7 +363,7 @@ router.post('/accept', async (req, res) => {
   }
 });
 
-router.delete('/reject', async (req, res) => {
+router.delete('/reject',writeLimiter, async (req, res) => {
   try {
     const supabase = createUserClient(req.userJWT ?? '');
 

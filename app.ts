@@ -5,6 +5,7 @@ import personalInfoRouter from './routes/personalUser.js';
 import messagesRouter from './routes/userMessages.js';
 import groupsRouter from './routes/groups.js';
 import cors from 'cors';
+import { defaultLimiter } from './middleware/rateLimiter.js';
 const app = express();
 
 app.use(
@@ -14,6 +15,7 @@ app.use(
   })
 );
 app.use(express.json());
+app.use('/api', defaultLimiter);
 app.use('/api/friendships', friendshipsRouter);
 app.use('/api', roomsRouter);
 app.use('/api/personal', personalInfoRouter);

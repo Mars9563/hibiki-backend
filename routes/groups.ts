@@ -14,14 +14,21 @@ import {
 } from '../services/room.service.js';
 import { getSignedAvatarUrl } from '../config/cloudinary.js';
 import { attachSignedAvatarUrls } from '../services/profile.service.js';
+import { searchLimiter, writeLimiter } from '../middleware/rateLimiter.js';
+
 const router = express.Router();
 router.use(authMiddleware);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 // ---------- POST /api/groups ----------
 // Create a group. Creator becomes the sole initial participant
 // (role: admin). Everyone in inviteeIds gets a pending group_invite —
 // there is no direct-add path, even at creation time.
-router.post('/groups', async (req, res) => {
+router.post('/groups', writeLimiter, async (req, res) => {
   try {
     const creatorId = req.userId as string;
     const creatorJWT = req.userJWT as string;
@@ -78,11 +85,13 @@ router.post('/groups', async (req, res) => {
 // Invite a user to an existing group. Admin-only, enforced in the
 // service layer. Same shape whether this is the first invite round
 // or a later "invite more people" action — no separate concept.
-router.post('/groups/:roomId/invites', async (req, res) => {
+router.post('/groups/:roomId/invites', writeLimiter, async (req, res) => {
   try {
     const inviterId = req.userId as string;
     const inviterJWT = req.userJWT as string;
-    const { roomId } = req.params;
+    const { roomId } = req.params as {
+      roomId: string;
+    };
     const { inviteeId } = req.body as { inviteeId?: string };
 
     if (!inviteeId) {
@@ -212,7 +221,7 @@ router.get('/group-invites/pending', async (req, res) => {
 });
 
 // ---------- POST /api/group-invites/accept ----------
-router.post('/group-invites/accept', async (req, res) => {
+router.post('/group-invites/accept', writeLimiter, async (req, res) => {
   try {
     const inviteeId = req.userId as string;
     const inviteeJWT = req.userJWT as string;
@@ -251,7 +260,7 @@ router.post('/group-invites/accept', async (req, res) => {
 });
 
 // ---------- DELETE /api/group-invites/reject ----------
-router.delete('/group-invites/reject', async (req, res) => {
+router.delete('/group-invites/reject', writeLimiter, async (req, res) => {
   try {
     const inviteeId = req.userId as string;
     const { inviteId } = req.body as { inviteId?: string };
@@ -284,7 +293,7 @@ router.delete('/group-invites/reject', async (req, res) => {
 // independent of friendship status, so your actual friends (who
 // you're most likely to want in a group) must show up. Only
 // exclusion: yourself.
-router.get('/groups/search', async (req, res) => {
+router.get('/groups/search', searchLimiter, async (req, res) => {
   try {
     const supabase = createUserClient(req.userJWT ?? '');
     const userId = req.userId;
@@ -319,47 +328,47 @@ router.get('/groups/search', async (req, res) => {
   }
 });
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
-});
-
 // ---------- PATCH /api/groups/:roomId ----------
 // Admin-only. Same single-combined-save shape as PATCH /personal/me —
 // name, description, and/or a new icon all in one multipart request.
-router.patch('/groups/:roomId', upload.single('avatar'), async (req, res) => {
-  try {
-    const adminId = req.userId as string;
-    const adminJWT = req.userJWT as string;
-    const { roomId } = req.params as {
-      roomId: string;
-    };
-    const { name, description } = req.body as {
-      name?: string;
-      description?: string;
-    };
+router.patch(
+  '/groups/:roomId',
+  writeLimiter,
+  upload.single('avatar'),
+  async (req, res) => {
+    try {
+      const adminId = req.userId as string;
+      const adminJWT = req.userJWT as string;
+      const { roomId } = req.params as {
+        roomId: string;
+      };
+      const { name, description } = req.body as {
+        name?: string;
+        description?: string;
+      };
 
-    const room = await updateGroup({
-      roomId,
-      adminId,
-      adminJWT,
-      name,
-      description,
-      avatarBuffer: req.file?.buffer,
-    });
+      const room = await updateGroup({
+        roomId,
+        adminId,
+        adminJWT,
+        name,
+        description,
+        avatarBuffer: req.file?.buffer,
+      });
 
-    return res.status(200).json({ success: true, room });
-  } catch (error) {
-    if (error instanceof GroupServiceError) {
+      return res.status(200).json({ success: true, room });
+    } catch (error) {
+      if (error instanceof GroupServiceError) {
+        return res
+          .status(error.status)
+          .json({ success: false, message: error.message });
+      }
+      console.error('Update group error:', error);
       return res
-        .status(error.status)
-        .json({ success: false, message: error.message });
+        .status(500)
+        .json({ success: false, message: 'Internal server error' });
     }
-    console.error('Update group error:', error);
-    return res
-      .status(500)
-      .json({ success: false, message: 'Internal server error' });
   }
-});
+);
 
 export default router;
